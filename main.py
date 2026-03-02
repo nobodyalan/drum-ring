@@ -1,5 +1,7 @@
 import sys
 import os
+import subprocess
+from pathlib import Path
 
 import numpy as np
 from tqdm import trange
@@ -17,6 +19,7 @@ from qasync import QEventLoop, asyncSlot
 
 from bleak import BleakScanner
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QMainWindow,
     QWidget,
@@ -29,17 +32,19 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QGridLayout,
     QProgressBar,
+    QSpinBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from core.ble_ring_v2 import BLERing
+from core.stream_hub import ImuStreamHub
 
 # ============================================================================
 # 1. 样式表
 # ============================================================================
 STYLE_SHEET = """
-QMainWindow { background-color: #f2f3f5; }
+QMainWindow { background-color: #f6f8fb; }
 
 /* 卡片样式 */
 QFrame.device-card {
@@ -55,15 +60,30 @@ QFrame.device-card-connected {
 
 /* 按钮样式 */
 QPushButton {
-    border-radius: 4px; padding: 6px 12px; border: none; font-weight: bold; color: white;
+    border-radius: 10px;
+    padding: 8px 14px;
+    border: none;
+    font-weight: 600;
+    color: white;
+    min-height: 20px;
+    font-size: 13px;
 }
-QPushButton:disabled { background-color: #cbd5e0; color: #718096; }
+QPushButton:disabled { background-color: #cbd5e0;}
 QPushButton.btn-primary { background-color: #3182ce; }
 QPushButton.btn-primary:hover { background-color: #2b6cb0; }
 QPushButton.btn-danger { background-color: #e53e3e; }
 QPushButton.btn-danger:hover { background-color: #c53030; }
 QPushButton.btn-success { background-color: #38b2ac; }
 QPushButton.btn-gray { background-color: #a0aec0; color: white; }
+QSpinBox {
+    background-color: #ffffff;
+    border: 1px solid #d6dee9;
+    border-radius: 8px;
+    padding: 6px 10px;
+    min-height: 20px;
+    color: #1e293b;
+    font-size: 13px;
+}
 
 /* 文本 */
 QLabel { font-size: 13px; color: #2d3748; }
@@ -380,6 +400,9 @@ class DeviceCard(QFrame):
 
 
 class MainWindow(QMainWindow):
+    STREAM_HOST = "127.0.0.1"
+    STREAM_PORT = 17888
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ring Device Manager")
@@ -387,6 +410,10 @@ class MainWindow(QMainWindow):
 
         self.devices: Dict[str, RingDevice] = {}
         self.cards: Dict[str, DeviceCard] = {}
+        self.stream_hub = ImuStreamHub(host=self.STREAM_HOST, port=self.STREAM_PORT)
+        self.app_processes: list[subprocess.Popen] = []
+        self._stream_started = False
+        self._port_switch_task: asyncio.Task | None = None
 
         self.init_ui()
 
@@ -401,12 +428,20 @@ class MainWindow(QMainWindow):
         self.btn_scan.setProperty("class", "btn-primary")
         self.btn_scan.clicked.connect(self.start_scan)  # 连接到 asyncSlot
 
-        self.chk_auto = QCheckBox("自动转发")
+        self.port_input = QSpinBox()
+        self.port_input.setRange(1024, 65535)
+        self.port_input.setValue(self.STREAM_PORT)
+        self.port_input.setFixedWidth(110)
+        self.port_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.port_input.valueChanged.connect(self.on_port_changed)
+
         self.lbl_msg = QLabel("就绪")
         self.lbl_msg.setStyleSheet("margin-left: 20px; color: #666;")
 
+        top_layout.setSpacing(10)
         top_layout.addWidget(self.btn_scan)
-        top_layout.addWidget(self.chk_auto)
+        top_layout.addWidget(QLabel("Port"))
+        top_layout.addWidget(self.port_input)
         top_layout.addWidget(self.lbl_msg)
         top_layout.addStretch()
         main_layout.addLayout(top_layout)
@@ -425,6 +460,82 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(self.scroll_content)
         main_layout.addWidget(scroll)
+
+        apps_row = QHBoxLayout()
+        lbl_apps = QLabel("应用")
+        lbl_apps.setProperty("class", "title")
+        apps_row.addWidget(lbl_apps)
+
+        btn_demo = QPushButton("示范应用")
+        btn_demo.setProperty("class", "btn-primary")
+        btn_demo.clicked.connect(
+            lambda: self.launch_app("apps/demo_processor_app.py", "示范应用")
+        )
+        apps_row.addWidget(btn_demo)
+
+        btn_visual = QPushButton("IMU 可视化")
+        btn_visual.setProperty("class", "btn-primary")
+        btn_visual.clicked.connect(
+            lambda: self.launch_app("apps/imu_visualizer_app.py", "IMU 可视化")
+        )
+        apps_row.addWidget(btn_visual)
+        apps_row.addStretch()
+        main_layout.addLayout(apps_row)
+
+    async def start_background_services(self):
+        await self.stream_hub.start()
+        self._stream_started = True
+        self.lbl_msg.setText(
+            f"就绪（数据流服务 {self.STREAM_HOST}:{self.STREAM_PORT} 已启动）"
+        )
+
+    def on_port_changed(self, port: int):
+        self.STREAM_PORT = int(port)
+        if not self._stream_started:
+            return
+        if self._port_switch_task and not self._port_switch_task.done():
+            self._port_switch_task.cancel()
+        self._port_switch_task = asyncio.create_task(self.restart_stream_hub())
+
+    async def restart_stream_hub(self):
+        try:
+            self.lbl_msg.setText(f"正在切换数据流端口到 {self.STREAM_PORT}...")
+            await self.stream_hub.stop()
+            self.stream_hub = ImuStreamHub(host=self.STREAM_HOST, port=self.STREAM_PORT)
+            for device in self.devices.values():
+                self.stream_hub.upsert_ring(
+                    device.address, device.name, connected=device.is_connected
+                )
+            await self.stream_hub.start()
+            self.lbl_msg.setText(
+                f"就绪（数据流服务 {self.STREAM_HOST}:{self.STREAM_PORT} 已启动）"
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            self.lbl_msg.setText(f"端口切换失败: {exc}")
+
+    def launch_app(self, app_rel_path: str, app_name: str):
+        script = Path(__file__).resolve().parent / app_rel_path
+        if not script.exists():
+            self.lbl_msg.setText(f"{app_name} 启动失败：未找到 {app_rel_path}")
+            return
+
+        cmd = [
+            sys.executable,
+            str(script),
+            "--host",
+            self.STREAM_HOST,
+            "--port",
+            str(self.STREAM_PORT),
+        ]
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(Path(__file__).resolve().parent),
+            start_new_session=True,
+        )
+        self.app_processes.append(process)
+        self.lbl_msg.setText(f"{app_name} 已启动（PID: {process.pid}）")
 
     # ------------------------------------------------------------------------
     # 异步逻辑核心
@@ -463,17 +574,24 @@ class MainWindow(QMainWindow):
 
             if addr in self.devices:
                 self.devices[addr].update_info(name)
+                self.stream_hub.upsert_ring(
+                    addr, name, connected=self.devices[addr].is_connected
+                )
                 if addr in self.cards:
                     self.cards[addr].refresh_view()
             else:
                 new_device = RingDevice(addr, name)
                 new_device.ring_logic = BLERing(
                     addr,
-                    index=0,
+                    index=len(self.devices),
                     name=name,
+                    imu_callback=lambda _, imu, address=addr: self.handle_imu_data(
+                        address, imu
+                    ),
                     update_view_callback=lambda address: self.refresh_card(address),
                 )
                 self.devices[addr] = new_device
+                self.stream_hub.upsert_ring(addr, name, connected=False)
                 self.add_card_ui(new_device)
 
         current_addresses = set(self.devices.keys())
@@ -483,13 +601,46 @@ class MainWindow(QMainWindow):
             device = self.devices[addr]
             if not device.is_connected:
                 self.remove_card_ui(addr)
+                self.stream_hub.remove_ring(addr)
                 del self.devices[addr]
 
         self.lbl_msg.setText(f"扫描结束。当前设备数: {len(self.devices)}")
 
     def refresh_card(self, address: str):
+        device = self.devices.get(address)
+        if device is None:
+            return
+
+        ring_connected = bool(
+            device.ring_logic is not None and getattr(device.ring_logic, "connected", False)
+        )
+        if device.is_connected != ring_connected:
+            device.is_connected = ring_connected
+            if not ring_connected:
+                device.is_recording = False
+                self.lbl_msg.setText(f"{device.name} 已自动断开")
+            self.stream_hub.upsert_ring(
+                device.address, device.name, connected=device.is_connected
+            )
+
         if address in self.cards:
             self.cards[address].refresh_view()
+
+    def handle_imu_data(self, address: str, imu):
+        device = self.devices.get(address)
+        if device is None:
+            return
+        self.stream_hub.publish_imu(
+            address=address,
+            name=device.name,
+            timestamp=time.time(),
+            acc_x=imu.acc_x,
+            acc_y=imu.acc_y,
+            acc_z=imu.acc_z,
+            gyr_x=imu.gyr_x,
+            gyr_y=imu.gyr_y,
+            gyr_z=imu.gyr_z,
+        )
 
     def add_card_ui(self, device: RingDevice):
         card = DeviceCard(device)
@@ -528,11 +679,17 @@ class MainWindow(QMainWindow):
                     self.lbl_msg.setText(f"正在断开 {device.name}...")
                     await DeviceService.disconnect_device(device)
                     device.is_connected = False
+                    self.stream_hub.upsert_ring(
+                        device.address, device.name, connected=False
+                    )
                     self.lbl_msg.setText(f"{device.name} 已断开")
                 else:
                     self.lbl_msg.setText(f"正在连接 {device.name}...")
                     await DeviceService.connect_device(device)
                     device.is_connected = True
+                    self.stream_hub.upsert_ring(
+                        device.address, device.name, connected=True
+                    )
                     self.lbl_msg.setText(f"{device.name} 连接成功")
 
             elif action == "sync":
@@ -613,6 +770,10 @@ class MainWindow(QMainWindow):
         print("清理完成，正在退出。")
 
         # 3. 标记清理完成，并重新手动关闭窗口
+        if self._port_switch_task and not self._port_switch_task.done():
+            self._port_switch_task.cancel()
+        await self.stream_hub.stop()
+        self._stream_started = False
         self._is_cleaned_up = True
 
         # 再次调用 close()，这次会触发 closeEvent 并进入 if 分支
@@ -643,6 +804,7 @@ if __name__ == "__main__":
 
     win = MainWindow()
     win.show()
+    asyncio.get_event_loop().create_task(win.start_background_services())
 
     # 使用 loop.run_forever() 替代 app.exec()
     with loop:

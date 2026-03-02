@@ -280,8 +280,11 @@ class BLERing:
         self.imu_fps_count = 0
 
     def on_disconnect(self, clients):
-        # print('Disconnected')
-        pass
+        _ = clients
+        self.connected = False
+        self.is_recording = False
+        if self.update_view_callback is not None:
+            self.update_view_callback(self.address)
 
     def notify_callback(self, sender, data: bytearray):
         # print(len(data))
@@ -421,48 +424,15 @@ class BLERing:
             packet_size = len(data[4:])  # should be multiple of 6
             imu_data_int8 = data[4:]
             # print(f"Ring {self.index} imu int8 data: {imu_data_int8}")
+
+            z_m = (-0.143, -2.291, -5.800, 0.034, 0.049, -0.036)
+            z_s = (5.403, 4.641, 5.621, 1.996, 2.390, 1.354)
+
             for i in range(packet_size // 6):
-                z_m = [-0.143, -2.291, -5.800, 0.034, 0.049, -0.036]
-                z_s = [5.403, 4.641, 5.621, 1.996, 2.390, 1.354]
-                imu = IMUData(
-                    (
-                        struct.unpack("b", imu_data_int8[i * 6 + 0 : i * 6 + 1])[0]
-                        / 16
-                        * z_s[0]
-                        + z_m[0]
-                    ),
-                    (
-                        struct.unpack("b", imu_data_int8[i * 6 + 1 : i * 6 + 2])[0]
-                        / 16
-                        * z_s[1]
-                        + z_m[1]
-                    ),
-                    (
-                        struct.unpack("b", imu_data_int8[i * 6 + 2 : i * 6 + 3])[0]
-                        / 16
-                        * z_s[2]
-                        + z_m[2]
-                    ),
-                    (
-                        struct.unpack("b", imu_data_int8[i * 6 + 3 : i * 6 + 4])[0]
-                        / 16
-                        * z_s[3]
-                        + z_m[3]
-                    ),
-                    (
-                        struct.unpack("b", imu_data_int8[i * 6 + 4 : i * 6 + 5])[0]
-                        / 16
-                        * z_s[4]
-                        + z_m[4]
-                    ),
-                    (
-                        struct.unpack("b", imu_data_int8[i * 6 + 5 : i * 6 + 6])[0]
-                        / 16
-                        * z_s[5]
-                        + z_m[5]
-                    ),
-                    time.perf_counter(),
-                )
+                raw = struct.unpack("6b", imu_data_int8[i * 6 : (i + 1) * 6])
+                calibrated = [raw[j] / 16 * z_s[j] + z_m[j] for j in range(6)]
+
+                imu = IMUData(*calibrated, time.perf_counter())
                 self.imu_callback(self.index, imu)
 
     async def connect(self, callback: FunctionType = None):
@@ -572,12 +542,24 @@ class BLERing:
 
 async def connect():
     coroutines = []
-    ring_addr = f"7ED722A8-D972-4C34-0CF9-B9059A4BCAF2"
+    ring_addr = f"C6D638AF-DEE1-7F21-E5DC-EB31C271A3D7"
     ring = BLERing(
-        ring_addr, index=0, imu_callback=lambda idx, imu: print(f"[Ring {idx}] {imu}")
+        ring_addr,
+        index=0,
+        imu_callback=lambda idx, imu: print(f"[Ring {idx}] {imu}"),
+        audio_callback=lambda idx, t, audio: print(
+            f"[Ring {idx}] Audio type {t} length {len(audio)}"
+        ),
     )
     coroutines.append(ring.connect())
     await asyncio.gather(*coroutines)
+
+    # open mic
+    await ring.open_audio()
+    # wait for a while to receive audio data
+    await asyncio.sleep(5)
+    # close mic
+    await ring.close_audio()
 
 
 if __name__ == "__main__":
