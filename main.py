@@ -1,0 +1,649 @@
+import sys
+import os
+
+import numpy as np
+from tqdm import trange
+
+os.environ["QT_API"] = "pyqt6"
+import json
+import asyncio
+import time
+from typing import Dict, List, Any
+
+# ----------------------------------------------------------------------------
+# 引入 qasync 核心组件
+# ----------------------------------------------------------------------------
+from qasync import QEventLoop, asyncSlot
+
+from bleak import BleakScanner
+from PyQt6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QCheckBox,
+    QFrame,
+    QScrollArea,
+    QGridLayout,
+    QProgressBar,
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
+
+from core.ble_ring_v2 import BLERing
+
+# ============================================================================
+# 1. 样式表
+# ============================================================================
+STYLE_SHEET = """
+QMainWindow { background-color: #f2f3f5; }
+
+/* 卡片样式 */
+QFrame.device-card {
+    background-color: #ffffff;
+    border: 1px solid #dcdcdc;
+    border-radius: 8px;
+}
+QFrame.device-card-connected {
+    background-color: #e6fffa;
+    border: 1px solid #38b2ac;
+    border-radius: 8px;
+}
+
+/* 按钮样式 */
+QPushButton {
+    border-radius: 4px; padding: 6px 12px; border: none; font-weight: bold; color: white;
+}
+QPushButton:disabled { background-color: #cbd5e0; color: #718096; }
+QPushButton.btn-primary { background-color: #3182ce; }
+QPushButton.btn-primary:hover { background-color: #2b6cb0; }
+QPushButton.btn-danger { background-color: #e53e3e; }
+QPushButton.btn-danger:hover { background-color: #c53030; }
+QPushButton.btn-success { background-color: #38b2ac; }
+QPushButton.btn-gray { background-color: #a0aec0; color: white; }
+
+/* 文本 */
+QLabel { font-size: 13px; color: #2d3748; }
+QLabel.title { font-size: 14px; font-weight: bold; }
+QLabel.sub-text { font-size: 11px; color: #718096; }
+"""
+
+# ============================================================================
+# 2. 数据模型 (Model)
+# ============================================================================
+
+
+class RingDevice:
+    """
+    单个设备的逻辑实体。
+    """
+
+    def __init__(self, address: str, name: str):
+        self.address = address
+        self.name = name
+        self.is_connected = False
+        self.is_recording = False
+
+        # 逻辑成员
+        self.ring_logic: BLERing | None = None
+        # 布局成员
+        self.ui_layout: Any = None
+
+    def update_info(self, name: str):
+        self.name = name
+
+
+# ============================================================================
+# 3. 业务服务层 (Service) - 修改为纯 Async
+# ============================================================================
+
+
+class DeviceService:
+    """
+    处理扫描、连接、IO等耗时操作。
+    改为原生 async 方法，移除 asyncio.run()
+    """
+
+    @staticmethod
+    async def scan_ble() -> List[dict]:
+        """执行蓝牙扫描"""
+        # BleakScanner.discover 本身就是 awaitable
+        devices = await BleakScanner.discover(timeout=3.0)
+        results = []
+        for d in devices:
+            name = d.name or "Unknown"
+            if name.startswith("BCL"):
+                results.append({"name": name, "address": d.address})
+
+        return results
+
+    @staticmethod
+    async def connect_device(device: RingDevice):
+        """异步连接"""
+        await device.ring_logic.connect()
+        if device.ring_logic.connected:
+            return True
+        else:
+            raise Exception("连接失败")
+
+    @staticmethod
+    async def disconnect_device(device: RingDevice):
+        """异步断开"""
+        await device.ring_logic.disconnect()
+        return True
+
+    @staticmethod
+    async def start_recording(device: RingDevice):
+        """异步开始录制"""
+        await device.ring_logic.start_recording()
+        return True
+
+    @staticmethod
+    async def stop_recording(device: RingDevice):
+        """异步停止录制"""
+        await device.ring_logic.stop_recording()
+        return True
+
+    @staticmethod
+    async def sync_time(device: RingDevice, progress_callback=None):
+        """异步同步数据"""
+        if not device.ring_logic.connected:
+            raise Exception("设备未连接")
+
+        ring = device.ring_logic
+
+        calib_packet_num = 300
+        calib_packet_interval = 0.1
+        max_calib_delta = 0.016
+        cnt = 0
+        pc_timestamps = []
+        ring_timestamps = []
+        pc_delta_time = []
+
+        for _ in trange(calib_packet_num):
+            if progress_callback:
+                progress_callback(cnt, calib_packet_num)
+            await device.ring_logic.calib_time(index=cnt)
+            await asyncio.sleep(calib_packet_interval)
+            cnt += 1
+        await asyncio.sleep(1)
+
+        ring.start_calib_timestamps = np.sort(ring.start_calib_timestamps)
+        ring.end_calib_timestamps = np.sort(ring.end_calib_timestamps)
+        ring.ring_timestamps = np.sort(ring.ring_timestamps)
+        ring.end_indices = np.sort(np.array(ring.end_indices))
+        ring.start_calib_timestamps = ring.start_calib_timestamps[ring.end_indices]
+        assert len(ring.start_calib_timestamps) == len(ring.ring_timestamps)
+        assert len(ring.end_calib_timestamps) == len(ring.ring_timestamps)
+
+        pc_timestamps = (ring.start_calib_timestamps + ring.end_calib_timestamps) / 2
+        ring_timestamps = ring.ring_timestamps
+        pc_delta_time = ring.end_calib_timestamps - ring.start_calib_timestamps
+        timestamps = list(zip(pc_timestamps, ring_timestamps, pc_delta_time))
+        # sort with pc_delta
+        timestamps = sorted(timestamps, key=lambda x: x[2])
+        timestamps = [x for x in timestamps if x[2] < max_calib_delta]
+        print(
+            f"used calib packet num: {len(timestamps)}, percentage: {len(timestamps) / calib_packet_num}"
+        )
+
+        pc_timestamps, ring_timestamps, pc_delta_time = zip(*timestamps)
+
+        # linear regression
+        ring_timestamps = np.array(ring_timestamps)
+        pc_timestamps = np.array(pc_timestamps)
+        pc_delta_time = np.array(pc_delta_time)
+        X_b = np.c_[np.ones((len(ring_timestamps), 1)), ring_timestamps]
+        intercept, slope = np.linalg.inv(X_b.T.dot(X_b)).dot(X_b.T).dot(pc_timestamps)
+        print("intercept:", intercept, "slope:", slope)
+
+        # reset ring params
+        ring.reset_time_calib_data()
+
+        if progress_callback:
+            progress_callback(calib_packet_num, calib_packet_num)  # end
+
+        # save
+        os.makedirs("records", exist_ok=True)
+        with open(f"records/calib_time_{int(time.time())}.json", "w") as f:
+            json.dump(
+                {
+                    "intercept": intercept,
+                    "slope": slope,
+                    "pc_timestamps": pc_timestamps.tolist(),
+                    "ring_timestamps": ring_timestamps.tolist(),
+                    "pc_delta_time": pc_delta_time.tolist(),
+                    "ring_mac": ring.address,
+                },
+                f,
+            )
+
+        if len(timestamps) < 20:
+            raise Exception("校准数据不足，可能同步失败，最好重新同步")
+
+
+# ============================================================================
+# 4. UI 组件 (View)
+# ============================================================================
+
+
+class DeviceCard(QFrame):
+    """
+    设备卡片 UI 组件。
+    通过信号与 MainWindow 交互，避免直接持有 MainWindow 引用。
+    通过回调函数与 RingLogic 交互，避免直接持有 RingLogic 引用。
+    通过刷新函数更新 UI 状态，避免 MainWindow 直接操作 UI组件。
+    """
+
+    sig_action = pyqtSignal(str, str)  # address, action
+
+    def __init__(self, device: RingDevice):
+        super().__init__()
+        self.device = device  # 持有设备引用，方便访问状态和逻辑
+        self.init_ui()
+        self.refresh_view()
+
+    def init_ui(self):
+        self.setFixedSize(320, 240)
+        layout = QVBoxLayout(self)
+
+        # 第一行：名称
+        row1 = QHBoxLayout()
+        self.lbl_name = QLabel(self.device.name)
+        self.lbl_name.setProperty("class", "title")
+        row1.addWidget(self.lbl_name)
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        # 第二行：地址
+        self.lbl_addr = QLabel(self.device.address)
+        self.lbl_addr.setProperty("class", "sub-text")
+        layout.addWidget(self.lbl_addr)
+
+        # 第三行：状态
+        self.lbl_status = QLabel("● 未连接")
+        self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_status)
+
+        layout.addStretch()
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+        layout.addStretch()
+
+        # 4. 按钮区
+        btn_layout = QGridLayout()
+        self.btn_connect = QPushButton("连接")
+        self.btn_connect.clicked.connect(
+            lambda: self.sig_action.emit(self.device.address, "connect")
+        )
+
+        self.btn_sync = QPushButton("同步")
+        self.btn_sync.setProperty("class", "btn-gray")
+        self.btn_sync.clicked.connect(
+            lambda: self.sig_action.emit(self.device.address, "sync")
+        )
+
+        self.btn_record = QPushButton("开始录制")
+        self.btn_record.setProperty("class", "btn-gray")
+        self.btn_record.clicked.connect(
+            lambda: self.sig_action.emit(self.device.address, "record")
+        )
+
+        btn_layout.addWidget(self.btn_connect, 0, 0, 1, 2)
+        btn_layout.addWidget(self.btn_sync, 1, 0)
+        btn_layout.addWidget(self.btn_record, 1, 1)
+        layout.addLayout(btn_layout)
+
+        # 5. 状态信息栏 (电量 | FPS)
+        stat_row = QHBoxLayout()
+        stat_row.setSpacing(8)
+
+        self.lbl_battery = QLabel("电量：--%")
+        self.lbl_battery.setProperty("class", "stat-tag")
+        self.lbl_battery.setVisible(True)
+
+        self.lbl_fps = QLabel("帧率：--Hz")
+        self.lbl_fps.setProperty("class", "stat-tag")
+        self.lbl_fps.setVisible(True)
+
+        stat_row.addWidget(self.lbl_battery)
+        stat_row.addStretch()
+        stat_row.addWidget(self.lbl_fps)
+        layout.addLayout(stat_row)
+
+    def update_progress(self, current, total):
+        """由外部调用的槽函数，用于更新进度条"""
+        if not self.progress_bar.isVisible():
+            self.progress_bar.setVisible(True)
+
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+
+        if current >= total:
+            self.lbl_status.setText(f"同步完成")
+            self.progress_bar.setVisible(False)
+
+    def refresh_view(self):
+        self.lbl_name.setText(self.device.name)
+
+        if self.device.is_connected:
+            self.setProperty("class", "device-card-connected")
+            self.lbl_status.setText("● 已连接")
+            self.lbl_status.setStyleSheet("color: #e53e3e; font-weight: bold;")
+
+            self.btn_connect.setText("断开")
+            self.btn_connect.setProperty("class", "btn-danger")
+
+            self.btn_sync.setEnabled(True)
+            self.btn_sync.setProperty("class", "btn-primary")
+
+            self.btn_record.setEnabled(True)
+            if self.device.is_recording:
+                self.btn_record.setText("停止录制")
+                self.btn_record.setProperty("class", "btn-danger")
+            else:
+                self.btn_record.setText("开始录制")
+                self.btn_record.setProperty("class", "btn-primary")
+
+        else:
+            self.setProperty("class", "device-card")
+            self.lbl_status.setText("● 未连接")
+            self.lbl_status.setStyleSheet("color: #a0aec0;")
+
+            self.btn_connect.setText("连接")
+            self.btn_connect.setProperty("class", "btn-primary")
+
+            self.btn_sync.setEnabled(False)
+            self.btn_sync.setProperty("class", "btn-gray")
+            self.btn_record.setEnabled(False)
+            self.btn_record.setProperty("class", "btn-gray")
+
+        self.lbl_battery.setText(
+            f"电量：{self.device.ring_logic.battery_level if self.device.ring_logic.battery_level > 0 else '--'}%"
+        )
+        self.lbl_fps.setText(f"帧率：{self.device.ring_logic.imu_fps:.1f}Hz")
+
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.style().polish(self.btn_sync)
+        self.style().polish(self.btn_record)
+
+
+# ============================================================================
+# 5. 主窗口 (Controller) - Logic Refactored
+# ============================================================================
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Ring Device Manager")
+        self.resize(900, 600)
+
+        self.devices: Dict[str, RingDevice] = {}
+        self.cards: Dict[str, DeviceCard] = {}
+
+        self.init_ui()
+
+    def init_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+
+        # 顶部操作栏
+        top_layout = QHBoxLayout()
+        self.btn_scan = QPushButton("开始扫描")
+        self.btn_scan.setProperty("class", "btn-primary")
+        self.btn_scan.clicked.connect(self.start_scan)  # 连接到 asyncSlot
+
+        self.chk_auto = QCheckBox("自动转发")
+        self.lbl_msg = QLabel("就绪")
+        self.lbl_msg.setStyleSheet("margin-left: 20px; color: #666;")
+
+        top_layout.addWidget(self.btn_scan)
+        top_layout.addWidget(self.chk_auto)
+        top_layout.addWidget(self.lbl_msg)
+        top_layout.addStretch()
+        main_layout.addLayout(top_layout)
+
+        # 滚动区域
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none;")
+
+        self.scroll_content = QWidget()
+        self.card_layout = QHBoxLayout(self.scroll_content)
+        self.card_layout.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self.card_layout.setSpacing(15)
+
+        scroll.setWidget(self.scroll_content)
+        main_layout.addWidget(scroll)
+
+    # ------------------------------------------------------------------------
+    # 异步逻辑核心
+    # ------------------------------------------------------------------------
+
+    @asyncSlot()
+    async def start_scan(self):
+        """
+        异步扫描槽函数。
+        """
+        self.btn_scan.setEnabled(False)
+        self.btn_scan.setText("扫描中...")
+        self.lbl_msg.setText("正在扫描蓝牙环境...")
+
+        try:
+            # 直接 await 异步服务
+            scanned_list = await DeviceService.scan_ble()
+
+            # 扫描完成，直接在下方处理 UI 更新（因为我们仍在主线程上下文中）
+            self.process_scan_results(scanned_list)
+
+        except Exception as e:
+            self.lbl_msg.setText(f"扫描错误: {e}")
+        finally:
+            self.btn_scan.setEnabled(True)
+            self.btn_scan.setText("开始扫描")
+
+    def process_scan_results(self, scanned_list: List[dict]):
+        """处理扫描结果"""
+        found_addresses = set()
+
+        for data in scanned_list:
+            addr = data["address"]
+            name = data["name"]
+            found_addresses.add(addr)
+
+            if addr in self.devices:
+                self.devices[addr].update_info(name)
+                if addr in self.cards:
+                    self.cards[addr].refresh_view()
+            else:
+                new_device = RingDevice(addr, name)
+                new_device.ring_logic = BLERing(
+                    addr,
+                    index=0,
+                    name=name,
+                    update_view_callback=lambda address: self.refresh_card(address),
+                )
+                self.devices[addr] = new_device
+                self.add_card_ui(new_device)
+
+        current_addresses = set(self.devices.keys())
+        missing_addresses = current_addresses - found_addresses
+
+        for addr in missing_addresses:
+            device = self.devices[addr]
+            if not device.is_connected:
+                self.remove_card_ui(addr)
+                del self.devices[addr]
+
+        self.lbl_msg.setText(f"扫描结束。当前设备数: {len(self.devices)}")
+
+    def refresh_card(self, address: str):
+        if address in self.cards:
+            self.cards[address].refresh_view()
+
+    def add_card_ui(self, device: RingDevice):
+        card = DeviceCard(device)
+        # 信号连接到 asyncSlot
+        card.sig_action.connect(self.handle_card_action)
+        self.card_layout.addWidget(card)
+        self.cards[device.address] = card
+
+    def remove_card_ui(self, address: str):
+        if address in self.cards:
+            card = self.cards.pop(address)
+            self.card_layout.removeWidget(card)
+            card.deleteLater()
+
+    # ------------------------------------------------------------------------
+    # 交互处理 - 使用 asyncSlot
+    # ------------------------------------------------------------------------
+
+    @asyncSlot(str, str)
+    async def handle_card_action(self, address: str, action: str):
+        """
+        统一处理卡片动作的异步槽
+        """
+        device = self.devices.get(address)
+        if not device:
+            return
+
+        # 找到 UI 卡片进行交互锁定
+        card = self.cards.get(address)
+        if card:
+            card.setEnabled(False)
+
+        try:
+            if action == "connect":
+                if device.is_connected:
+                    self.lbl_msg.setText(f"正在断开 {device.name}...")
+                    await DeviceService.disconnect_device(device)
+                    device.is_connected = False
+                    self.lbl_msg.setText(f"{device.name} 已断开")
+                else:
+                    self.lbl_msg.setText(f"正在连接 {device.name}...")
+                    await DeviceService.connect_device(device)
+                    device.is_connected = True
+                    self.lbl_msg.setText(f"{device.name} 连接成功")
+
+            elif action == "sync":
+                self.lbl_msg.setText(f"正在同步 {device.name}...")
+                await DeviceService.sync_time(
+                    device, progress_callback=card.update_progress
+                )
+                self.lbl_msg.setText(f"{device.name} 同步完成")
+
+            elif action == "record":
+                if device.is_recording:
+                    await DeviceService.stop_recording(device)
+                    self.lbl_msg.setText(f"{device.name} 停止录制")
+                    device.is_recording = False
+                else:
+                    await DeviceService.start_recording(device)
+                    self.lbl_msg.setText(f"{device.name} 开始录制...")
+                    device.is_recording = True
+
+        except Exception as e:
+            self.lbl_msg.setText(f"操作失败: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+        finally:
+            # 无论成功失败，恢复 UI 状态
+            if card:
+                card.setEnabled(True)
+                card.refresh_view()
+
+    def closeEvent(self, event):
+        """
+        拦截窗口关闭事件。
+        如果是用户点击关闭，先忽略该事件，启动异步清理任务。
+        """
+        # 检查是否已经清理完毕
+        if getattr(self, "_is_cleaned_up", False):
+            event.accept()  # 已清理，允许关闭
+            return
+
+        # 1. 忽略当前的关闭请求（防止窗口立即消失）
+        event.ignore()
+
+        # 2. 启动清理任务，并传入当前窗口作为引用
+        self.lbl_msg.setText("正在清理资源，请稍候...")
+        asyncio.create_task(self.shutdown_and_close())
+
+    async def shutdown_and_close(self):
+        """
+        执行异步清理：断开蓝牙、取消任务
+        """
+        print("正在开始清理...")
+
+        # 先保存数据
+        tasks = []
+        for addr, device in self.devices.items():
+            if device.is_recording:
+                print(f"正在停止录制: {device.name}")
+                tasks.append(DeviceService.stop_recording(device))
+                device.is_recording = False
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        tasks = []
+        for addr, device in self.devices.items():
+            if device.is_connected:
+                print(f"正在断开: {device.name}")
+                # 即使断开出错也不要卡住退出
+                tasks.append(self.safe_disconnect(device))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 2. (可选) 这里可以取消其他正在运行的后台任务
+        # pending = asyncio.all_tasks()
+        # ... cancel logic ...
+
+        print("清理完成，正在退出。")
+
+        # 3. 标记清理完成，并重新手动关闭窗口
+        self._is_cleaned_up = True
+
+        # 再次调用 close()，这次会触发 closeEvent 并进入 if 分支
+        self.close()
+
+    async def safe_disconnect(self, device):
+        """辅助函数：安全断开，忽略错误"""
+        try:
+            await DeviceService.disconnect_device(device)
+        except Exception as e:
+            print(f"断开 {device.name} 时出错 (可忽略): {e}")
+
+
+# ============================================================================
+# 6. 程序入口 - 启动 qasync 循环
+# ============================================================================
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyleSheet(STYLE_SHEET)
+
+    font = QFont("Microsoft YaHei", 9)
+    app.setFont(font)
+
+    # 创建 qasync 事件循环
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)
+
+    win = MainWindow()
+    win.show()
+
+    # 使用 loop.run_forever() 替代 app.exec()
+    with loop:
+        loop.run_forever()
