@@ -339,13 +339,13 @@ class RecorderWindow(QMainWindow):
                 count += 1
 
         if self.audio_pcm:
-            os.makedirs("audio", exist_ok=True)
+            os.makedirs("data", exist_ok=True)
             for address, pcm in self.audio_pcm.items():
                 if not pcm:
                     continue
                 ring_name = self.ring_names.get(address, "Unknown")
                 safe_name = self._safe_name(ring_name)
-                filename = f"audio/{safe_name}_{address}_{start_ts}.wav"
+                filename = f"data/{safe_name}_{address}_{start_ts}.wav"
                 with wave.open(filename, "wb") as wavfile:
                     wavfile.setnchannels(1)
                     wavfile.setsampwidth(2)
