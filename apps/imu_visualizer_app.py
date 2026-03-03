@@ -628,7 +628,9 @@ class ImuVisualizerWindow(QMainWindow):
     def apply_subscription(self) -> None:
         selected = self._selected_addresses()
         rings = selected if selected else [NONE_SUBSCRIPTION]
-        self.client.send_command({"cmd": "subscribe", "rings": rings})
+        self.client.send_command(
+            {"cmd": "subscribe", "rings": rings, "streams": ["imu"]}
+        )
         self._refresh_cards()
 
     def refresh_plots(self) -> None:

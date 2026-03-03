@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import json
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ class RingInfo:
 class ClientSession:
     writer: asyncio.StreamWriter
     subscriptions: set[str] = field(default_factory=set)
+    stream_types: set[str] = field(default_factory=lambda: {"imu"})
     queue: asyncio.Queue[str] = field(default_factory=lambda: asyncio.Queue(maxsize=4096))
     writer_task: asyncio.Task | None = None
 
@@ -83,7 +85,35 @@ class ImuStreamHub:
         }
         message = json.dumps(payload, ensure_ascii=False)
         for client in tuple(self._clients):
-            if client.subscriptions and address not in client.subscriptions:
+            if "imu" not in client.stream_types:
+                continue
+            if client.subscriptions is not None and address not in client.subscriptions:
+                continue
+            self._enqueue_for_client(client, message)
+
+    def publish_audio(
+        self,
+        *,
+        address: str,
+        name: str,
+        timestamp: float,
+        audio_type: int,
+        audio_bytes: bytes,
+    ) -> None:
+        payload = {
+            "type": "audio",
+            "address": address,
+            "name": name,
+            "timestamp": timestamp,
+            "audio_type": audio_type,
+            "sample_rate": 16000,
+            "data_b64": base64.b64encode(audio_bytes).decode("ascii"),
+        }
+        message = json.dumps(payload, ensure_ascii=False)
+        for client in tuple(self._clients):
+            if "audio" not in client.stream_types:
+                continue
+            if client.subscriptions is not None and address not in client.subscriptions:
                 continue
             self._enqueue_for_client(client, message)
 
@@ -133,12 +163,19 @@ class ImuStreamHub:
                 session.subscriptions = {str(x) for x in rings if str(x)}
             else:
                 session.subscriptions = set()
+            streams = command.get("streams")
+            if isinstance(streams, list):
+                stream_types = {str(x) for x in streams if str(x)}
+                session.stream_types = stream_types or {"imu"}
+            else:
+                session.stream_types = {"imu"}
             self._enqueue_for_client(
                 session,
                 json.dumps(
                     {
                         "type": "subscribed",
                         "rings": sorted(session.subscriptions),
+                        "streams": sorted(session.stream_types),
                     }
                 ),
             )

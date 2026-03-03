@@ -10,11 +10,15 @@
 ## 功能概览
 
 - 主程序：设备扫描、连接、同步、录制、状态显示
+- 主程序流控：可在顶部切换 IMU / 音频采集开关（IMU 默认开，音频默认关）
+- 主程序状态：设备卡显示电量、IMU 接收帧率、音频接收帧率（音频每 2 秒刷新）
 - 数据流服务：主程序内置 JSONL over TCP 发布服务
 - 应用系统：点击主界面“应用”按钮启动独立进程
 - 示例应用：
   - `apps/demo_processor_app.py`（处理模板）
   - `apps/imu_visualizer_app.py`（多戒指高性能可视化）
+  - `apps/audio_monitor_app.py`（音频解码、播放、保存）
+  - `apps/recorder_app.py`（多戒指 IMU/音频录制）
 
 ## 环境要求
 
@@ -42,15 +46,17 @@ uv run python main.py
 2. 对单个设备执行连接 / 同步 / 开始录制
 3. 在主界面底部“应用”栏启动独立应用
 4. 在顶部 `Port` 输入框切换应用数据流端口（运行中可切换）
+5. 使用顶部 `IMU` / `音频` checkbox 控制设备侧流开关
+6. 使用“录制中心”应用录制某几个戒指的 IMU/音频数据
 
 ## 数据输出
 
-程序会在项目根目录创建 `records/`：
+程序会在项目根目录创建 `data/`：
 
-- IMU 数据：`records/<设备名>_<时间戳>.npy`
+- IMU 数据：`data/<设备名>_<时间戳>.npy`
   - shape: `N x 7`
   - 列顺序：`acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z, timestamp`
-- 时间同步数据：`records/calib_time_<时间戳>.json`
+- 时间同步数据：`data/calib_time_<时间戳>.json`
 
 ## 目录结构
 
@@ -63,6 +69,8 @@ uv run python main.py
 ├── apps/
 │   ├── demo_processor_app.py       # 示例应用：数据处理模板
 │   ├── imu_visualizer_app.py       # 示例应用：IMU 可视化
+│   ├── audio_monitor_app.py        # 示例应用：音频监控（解码/播放/保存）
+│   ├── recorder_app.py             # 示例应用：多戒指录制中心
 │   └── common/
 │       ├── __init__.py
 │       └── stream_client.py        # 应用侧通用流客户端
@@ -92,6 +100,7 @@ uv run python main.py
 {"type":"hello","version":1}
 {"type":"status","rings":[{"address":"...","name":"BCL-01","connected":true}]}
 {"type":"imu","address":"...","name":"BCL-01","timestamp":1710000000.0,"acc":[0.1,0.2,0.3],"gyr":[1.0,2.0,3.0]}
+{"type":"audio","address":"...","name":"BCL-01","timestamp":1710000000.0,"audio_type":1,"sample_rate":16000,"data_b64":"..."}
 {"type":"subscribed","rings":["addr1","addr2"]}
 {"type":"error","message":"unsupported_command"}
 ```
@@ -101,11 +110,13 @@ uv run python main.py
 ```json
 {"cmd":"status"}
 {"cmd":"subscribe","rings":["addr1","addr2"]}
+{"cmd":"subscribe","rings":["addr1","addr2"],"streams":["imu","audio"]}
 ```
 
 说明：
 
 - `rings` 为空列表时默认接收全部
+- `streams` 可选，支持 `imu` / `audio`，不传时默认 `["imu"]`
 - 当前可视化应用为了“未订阅不显示”，会发送占位值避免接收全部
 
 ### 3. 推荐开发步骤
@@ -159,6 +170,8 @@ uv run python main.py
 # 运行示例应用（需主程序已启动）
 uv run python apps/demo_processor_app.py --host 127.0.0.1 --port 17888
 uv run python apps/imu_visualizer_app.py --host 127.0.0.1 --port 17888
+uv run python apps/audio_monitor_app.py --host 127.0.0.1 --port 17888
+uv run python apps/recorder_app.py --host 127.0.0.1 --port 17888
 
 # 检查语法
 python -m compileall main.py core apps

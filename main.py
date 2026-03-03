@@ -168,6 +168,26 @@ class DeviceService:
         return True
 
     @staticmethod
+    async def open_imu(device: RingDevice):
+        await device.ring_logic.open_imu()
+        return True
+
+    @staticmethod
+    async def close_imu(device: RingDevice):
+        await device.ring_logic.close_imu()
+        return True
+
+    @staticmethod
+    async def open_audio(device: RingDevice):
+        await device.ring_logic.open_audio()
+        return True
+
+    @staticmethod
+    async def close_audio(device: RingDevice):
+        await device.ring_logic.close_audio()
+        return True
+
+    @staticmethod
     async def sync_time(device: RingDevice, progress_callback=None):
         """异步同步数据"""
         if not device.ring_logic.connected:
@@ -227,8 +247,8 @@ class DeviceService:
             progress_callback(calib_packet_num, calib_packet_num)  # end
 
         # save
-        os.makedirs("records", exist_ok=True)
-        with open(f"records/calib_time_{int(time.time())}.json", "w") as f:
+        os.makedirs("data", exist_ok=True)
+        with open(f"data/calib_time_{int(time.time())}.json", "w") as f:
             json.dump(
                 {
                     "intercept": intercept,
@@ -308,18 +328,11 @@ class DeviceCard(QFrame):
             lambda: self.sig_action.emit(self.device.address, "sync")
         )
 
-        self.btn_record = QPushButton("开始录制")
-        self.btn_record.setProperty("class", "btn-gray")
-        self.btn_record.clicked.connect(
-            lambda: self.sig_action.emit(self.device.address, "record")
-        )
-
         btn_layout.addWidget(self.btn_connect, 0, 0, 1, 2)
-        btn_layout.addWidget(self.btn_sync, 1, 0)
-        btn_layout.addWidget(self.btn_record, 1, 1)
+        btn_layout.addWidget(self.btn_sync, 1, 0, 1, 2)
         layout.addLayout(btn_layout)
 
-        # 5. 状态信息栏 (电量 | FPS)
+        # 5. 状态信息栏 (电量 | IMU FPS | 音频 FPS)
         stat_row = QHBoxLayout()
         stat_row.setSpacing(8)
 
@@ -327,13 +340,18 @@ class DeviceCard(QFrame):
         self.lbl_battery.setProperty("class", "stat-tag")
         self.lbl_battery.setVisible(True)
 
-        self.lbl_fps = QLabel("帧率：--Hz")
-        self.lbl_fps.setProperty("class", "stat-tag")
-        self.lbl_fps.setVisible(True)
+        self.lbl_imu_fps = QLabel("IMU：--Hz")
+        self.lbl_imu_fps.setProperty("class", "stat-tag")
+        self.lbl_imu_fps.setVisible(True)
+
+        self.lbl_audio_fps = QLabel("音频：--Hz")
+        self.lbl_audio_fps.setProperty("class", "stat-tag")
+        self.lbl_audio_fps.setVisible(True)
 
         stat_row.addWidget(self.lbl_battery)
+        stat_row.addWidget(self.lbl_imu_fps)
+        stat_row.addWidget(self.lbl_audio_fps)
         stat_row.addStretch()
-        stat_row.addWidget(self.lbl_fps)
         layout.addLayout(stat_row)
 
     def update_progress(self, current, total):
@@ -362,14 +380,6 @@ class DeviceCard(QFrame):
             self.btn_sync.setEnabled(True)
             self.btn_sync.setProperty("class", "btn-primary")
 
-            self.btn_record.setEnabled(True)
-            if self.device.is_recording:
-                self.btn_record.setText("停止录制")
-                self.btn_record.setProperty("class", "btn-danger")
-            else:
-                self.btn_record.setText("开始录制")
-                self.btn_record.setProperty("class", "btn-primary")
-
         else:
             self.setProperty("class", "device-card")
             self.lbl_status.setText("● 未连接")
@@ -380,18 +390,16 @@ class DeviceCard(QFrame):
 
             self.btn_sync.setEnabled(False)
             self.btn_sync.setProperty("class", "btn-gray")
-            self.btn_record.setEnabled(False)
-            self.btn_record.setProperty("class", "btn-gray")
 
         self.lbl_battery.setText(
             f"电量：{self.device.ring_logic.battery_level if self.device.ring_logic.battery_level > 0 else '--'}%"
         )
-        self.lbl_fps.setText(f"帧率：{self.device.ring_logic.imu_fps:.1f}Hz")
+        self.lbl_imu_fps.setText(f"IMU：{self.device.ring_logic.imu_fps:.1f}Hz")
+        self.lbl_audio_fps.setText(f"音频：{self.device.ring_logic.audio_fps:.1f}Hz")
 
         self.style().unpolish(self)
         self.style().polish(self)
         self.style().polish(self.btn_sync)
-        self.style().polish(self.btn_record)
 
 
 # ============================================================================
@@ -414,6 +422,7 @@ class MainWindow(QMainWindow):
         self.app_processes: list[subprocess.Popen] = []
         self._stream_started = False
         self._port_switch_task: asyncio.Task | None = None
+        self._stream_mode_task: asyncio.Task | None = None
 
         self.init_ui()
 
@@ -435,6 +444,14 @@ class MainWindow(QMainWindow):
         self.port_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.port_input.valueChanged.connect(self.on_port_changed)
 
+        self.chk_imu_stream = QCheckBox("IMU")
+        self.chk_imu_stream.setChecked(True)
+        self.chk_imu_stream.stateChanged.connect(self.on_stream_mode_changed)
+
+        self.chk_audio_stream = QCheckBox("音频")
+        self.chk_audio_stream.setChecked(False)
+        self.chk_audio_stream.stateChanged.connect(self.on_stream_mode_changed)
+
         self.lbl_msg = QLabel("就绪")
         self.lbl_msg.setStyleSheet("margin-left: 20px; color: #666;")
 
@@ -442,6 +459,9 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.btn_scan)
         top_layout.addWidget(QLabel("Port"))
         top_layout.addWidget(self.port_input)
+        top_layout.addWidget(QLabel("转发流"))
+        top_layout.addWidget(self.chk_imu_stream)
+        top_layout.addWidget(self.chk_audio_stream)
         top_layout.addWidget(self.lbl_msg)
         top_layout.addStretch()
         main_layout.addLayout(top_layout)
@@ -479,6 +499,20 @@ class MainWindow(QMainWindow):
             lambda: self.launch_app("apps/imu_visualizer_app.py", "IMU 可视化")
         )
         apps_row.addWidget(btn_visual)
+
+        btn_audio = QPushButton("音频监控")
+        btn_audio.setProperty("class", "btn-success")
+        btn_audio.clicked.connect(
+            lambda: self.launch_app("apps/audio_monitor_app.py", "音频监控")
+        )
+        apps_row.addWidget(btn_audio)
+
+        btn_recorder = QPushButton("录制中心")
+        btn_recorder.setProperty("class", "btn-primary")
+        btn_recorder.clicked.connect(
+            lambda: self.launch_app("apps/recorder_app.py", "录制中心")
+        )
+        apps_row.addWidget(btn_recorder)
         apps_row.addStretch()
         main_layout.addLayout(apps_row)
 
@@ -514,6 +548,51 @@ class MainWindow(QMainWindow):
             return
         except Exception as exc:
             self.lbl_msg.setText(f"端口切换失败: {exc}")
+
+    def on_stream_mode_changed(self, _state: int):
+        if self._stream_mode_task and not self._stream_mode_task.done():
+            self._stream_mode_task.cancel()
+        self._stream_mode_task = asyncio.create_task(self.apply_stream_mode_to_connected())
+
+    async def apply_stream_mode_to_connected(self):
+        enabled_imu = self.chk_imu_stream.isChecked()
+        enabled_audio = self.chk_audio_stream.isChecked()
+        tasks = []
+        for device in self.devices.values():
+            if device.is_connected:
+                tasks.append(
+                    self.apply_stream_mode_to_device(
+                        device=device,
+                        enabled_imu=enabled_imu,
+                        enabled_audio=enabled_audio,
+                    )
+                )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.lbl_msg.setText(
+            f"流设置已应用（IMU: {'开' if enabled_imu else '关'}，音频: {'开' if enabled_audio else '关'}）"
+        )
+
+    async def apply_stream_mode_to_device(
+        self, device: RingDevice, enabled_imu: bool, enabled_audio: bool
+    ):
+        if not device.is_connected:
+            return
+        try:
+            if enabled_imu:
+                await DeviceService.open_imu(device)
+            else:
+                await DeviceService.close_imu(device)
+        except Exception as exc:
+            print(f"切换 IMU 流失败({device.name}): {exc}")
+
+        try:
+            if enabled_audio:
+                await DeviceService.open_audio(device)
+            else:
+                await DeviceService.close_audio(device)
+        except Exception as exc:
+            print(f"切换音频流失败({device.name}): {exc}")
 
     def launch_app(self, app_rel_path: str, app_name: str):
         script = Path(__file__).resolve().parent / app_rel_path
@@ -588,6 +667,9 @@ class MainWindow(QMainWindow):
                     imu_callback=lambda _, imu, address=addr: self.handle_imu_data(
                         address, imu
                     ),
+                    audio_callback=lambda _, audio_type, audio, address=addr: self.handle_audio_data(
+                        address, audio_type, audio
+                    ),
                     update_view_callback=lambda address: self.refresh_card(address),
                 )
                 self.devices[addr] = new_device
@@ -642,6 +724,18 @@ class MainWindow(QMainWindow):
             gyr_z=imu.gyr_z,
         )
 
+    def handle_audio_data(self, address: str, audio_type: int, audio: bytes):
+        device = self.devices.get(address)
+        if device is None:
+            return
+        self.stream_hub.publish_audio(
+            address=address,
+            name=device.name,
+            timestamp=time.time(),
+            audio_type=audio_type,
+            audio_bytes=bytes(audio),
+        )
+
     def add_card_ui(self, device: RingDevice):
         card = DeviceCard(device)
         # 信号连接到 asyncSlot
@@ -687,6 +781,11 @@ class MainWindow(QMainWindow):
                     self.lbl_msg.setText(f"正在连接 {device.name}...")
                     await DeviceService.connect_device(device)
                     device.is_connected = True
+                    await self.apply_stream_mode_to_device(
+                        device=device,
+                        enabled_imu=self.chk_imu_stream.isChecked(),
+                        enabled_audio=self.chk_audio_stream.isChecked(),
+                    )
                     self.stream_hub.upsert_ring(
                         device.address, device.name, connected=True
                     )
@@ -698,16 +797,6 @@ class MainWindow(QMainWindow):
                     device, progress_callback=card.update_progress
                 )
                 self.lbl_msg.setText(f"{device.name} 同步完成")
-
-            elif action == "record":
-                if device.is_recording:
-                    await DeviceService.stop_recording(device)
-                    self.lbl_msg.setText(f"{device.name} 停止录制")
-                    device.is_recording = False
-                else:
-                    await DeviceService.start_recording(device)
-                    self.lbl_msg.setText(f"{device.name} 开始录制...")
-                    device.is_recording = True
 
         except Exception as e:
             self.lbl_msg.setText(f"操作失败: {e}")
@@ -744,16 +833,6 @@ class MainWindow(QMainWindow):
         """
         print("正在开始清理...")
 
-        # 先保存数据
-        tasks = []
-        for addr, device in self.devices.items():
-            if device.is_recording:
-                print(f"正在停止录制: {device.name}")
-                tasks.append(DeviceService.stop_recording(device))
-                device.is_recording = False
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
         tasks = []
         for addr, device in self.devices.items():
             if device.is_connected:
@@ -772,6 +851,8 @@ class MainWindow(QMainWindow):
         # 3. 标记清理完成，并重新手动关闭窗口
         if self._port_switch_task and not self._port_switch_task.done():
             self._port_switch_task.cancel()
+        if self._stream_mode_task and not self._stream_mode_task.done():
+            self._stream_mode_task.cancel()
         await self.stream_hub.stop()
         self._stream_started = False
         self._is_cleaned_up = True

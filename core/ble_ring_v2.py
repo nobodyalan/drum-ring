@@ -278,11 +278,21 @@ class BLERing:
         self.imu_fps = 0.0
         self.imu_fps_start_time = None
         self.imu_fps_count = 0
+        self.AUDIO_FPS_INTERVAL = 2.0  # seconds
+        self.audio_fps = 0.0
+        self.audio_fps_start_time = None
+        self.audio_fps_count = 0
 
     def on_disconnect(self, clients):
         _ = clients
         self.connected = False
         self.is_recording = False
+        self.imu_fps = 0.0
+        self.audio_fps = 0.0
+        self.imu_fps_count = 0
+        self.audio_fps_count = 0
+        self.imu_fps_start_time = None
+        self.audio_fps_start_time = None
         if self.update_view_callback is not None:
             self.update_view_callback(self.address)
 
@@ -409,12 +419,14 @@ class BLERing:
             audio = data[-200:]
             if self.audio_callback is not None:
                 self.audio_callback(self.index, audio_type, audio)
+            self.update_audio_fps()
 
         elif data[2] == 0x71 and data[3] == 0x1:
             audio_type = 1
             audio = data[-200:]
             if self.audio_callback is not None:
                 self.audio_callback(self.index, audio_type, audio)
+            self.update_audio_fps()
 
         elif data[2] == 0x97 and data[3] == 0x0:
             gesture_code = data[4]
@@ -516,8 +528,8 @@ class BLERing:
         if filename:
             self.imu_filename = filename
         else:
-            os.makedirs("records", exist_ok=True)
-            self.imu_filename = f"records/{self.name}_{int(time.time())}.npy"
+            os.makedirs("data", exist_ok=True)
+            self.imu_filename = f"data/{self.name}_{int(time.time())}.npy"
         print(f"Started recording IMU to {self.imu_filename}")
         self.imu_data_streamer = MemmapStreamer(
             self.imu_filename,
@@ -538,6 +550,20 @@ class BLERing:
         await self.client.stop_notify(NotifyProtocol.READ_CHARACTERISTIC)
         await self.client.disconnect()
         print(f"Disconnected from {self.address}")
+
+    def update_audio_fps(self):
+        self.audio_fps_count += 1
+        if self.audio_fps_start_time is None:
+            self.audio_fps_start_time = time.perf_counter()
+            return
+
+        elapsed = time.perf_counter() - self.audio_fps_start_time
+        if elapsed >= (1.0 if not self.audio_fps else self.AUDIO_FPS_INTERVAL):
+            self.audio_fps = self.audio_fps_count / elapsed
+            self.audio_fps_count = 0
+            self.audio_fps_start_time = time.perf_counter()
+            if self.update_view_callback is not None:
+                self.update_view_callback(self.address)
 
 
 async def connect():

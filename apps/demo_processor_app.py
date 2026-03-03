@@ -210,7 +210,9 @@ class DemoProcessorWindow(QMainWindow):
 
     def apply_subscription(self) -> None:
         selected = [addr for addr, box in self.ring_boxes.items() if box.isChecked()]
-        self.client.send_command({"cmd": "subscribe", "rings": selected})
+        self.client.send_command(
+            {"cmd": "subscribe", "rings": selected, "streams": ["imu"]}
+        )
 
     def closeEvent(self, event):
         self.client.stop()
