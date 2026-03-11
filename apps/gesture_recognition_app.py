@@ -72,7 +72,7 @@ def load_gesture_config() -> GestureConfig:
         allowed_gestures=[6, 8, 13, 14, 16, 36],
         skipped_gestures=[36],
         positive_ratio=0.8,
-        result_window_length=8,
+        result_window_length=20,
         window_size=200,
         models=[
             "checkpoint/it-pinch/it-pinch.xml",
@@ -83,7 +83,7 @@ def load_gesture_config() -> GestureConfig:
             [16, 30, 31, 34, 35, 36],
         ],
         device="CPU",
-        merge_window_seconds=1.0,
+        merge_window_seconds=0.5,
     )
 
 
@@ -100,7 +100,8 @@ class RingRuntimeState:
 
 
 @dataclass
-class PendingSample:
+class PendingReading:
+    data: np.ndarray
     event_ts: float
 
 
@@ -287,6 +288,7 @@ class GestureInferenceWorker(QThread):
     MODE_MAX = "max"
     MODE_TARGET = "target"
     STATS_INTERVAL = 0.5
+    MAX_ACCEPTABLE_BACKLOG = 10
     RESET_MARKER = object()
     CLEAR_MARKER = object()
 
@@ -298,12 +300,11 @@ class GestureInferenceWorker(QThread):
         self._target_fps = 30.0
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        self._latest_samples: dict[str, PendingSample] = {}
-        self._sample_windows: dict[str, deque[np.ndarray]] = {}
-        self._latest_event_ts: dict[str, float] = {}
+        self._pending_readings: dict[str, deque[PendingReading]] = {}
+        self._reading_windows: dict[str, deque[np.ndarray]] = {}
         self._last_processed_at: dict[str, float] = {}
         self._ring_order: deque[str] = deque()
-        self._dropped_samples = 0
+        self._dropped_readings = 0
         self._received_since_stats = 0
         self._processed_since_stats = 0
         self._last_stats_time = time.perf_counter()
@@ -330,36 +331,30 @@ class GestureInferenceWorker(QThread):
         normalized_fps = max(0.1, float(target_fps))
         with self._condition:
             if self._mode != normalized_mode:
-                self._latest_samples.clear()
                 self._last_processed_at.clear()
             self._mode = normalized_mode
             self._target_fps = normalized_fps
             self._condition.notify_all()
 
-    def enqueue_sample(self, address: str, data: np.ndarray, event_ts: float) -> None:
-        sample = PendingSample(event_ts=event_ts)
+    def enqueue_reading(self, address: str, data: np.ndarray, event_ts: float) -> None:
+        reading = PendingReading(data=data, event_ts=event_ts)
         with self._condition:
             self._received_since_stats += 1
-            window = self._sample_windows.get(address)
-            if window is None:
-                window = deque(maxlen=self.cfg.window_size)
-                self._sample_windows[address] = window
-            window.append(data)
-            self._latest_event_ts[address] = event_ts
-            if address in self._latest_samples:
-                self._dropped_samples += 1
-            self._latest_samples[address] = sample
+            pending = self._pending_readings.get(address)
+            if pending is None:
+                pending = deque()
+                self._pending_readings[address] = pending
+            pending.append(reading)
             if address not in self._ring_order:
                 self._ring_order.append(address)
             self._condition.notify_all()
 
     def reset_counts(self) -> None:
         with self._condition:
-            self._latest_samples.clear()
-            self._sample_windows.clear()
-            self._latest_event_ts.clear()
+            self._pending_readings.clear()
+            self._reading_windows.clear()
             self._last_processed_at.clear()
-            self._dropped_samples = 0
+            self._dropped_readings = 0
             self._received_since_stats = 0
             self._processed_since_stats = 0
             self._last_stats_time = time.perf_counter()
@@ -371,9 +366,8 @@ class GestureInferenceWorker(QThread):
             if addresses is None:
                 self._clear_all_requested = True
                 self._clear_addresses.clear()
-                self._latest_samples.clear()
-                self._sample_windows.clear()
-                self._latest_event_ts.clear()
+                self._pending_readings.clear()
+                self._reading_windows.clear()
                 self._last_processed_at.clear()
             else:
                 normalized = {addr for addr in addresses if addr}
@@ -382,9 +376,8 @@ class GestureInferenceWorker(QThread):
                 if not self._clear_all_requested:
                     self._clear_addresses.update(normalized)
                 for address in normalized:
-                    self._latest_samples.pop(address, None)
-                    self._sample_windows.pop(address, None)
-                    self._latest_event_ts.pop(address, None)
+                    self._pending_readings.pop(address, None)
+                    self._reading_windows.pop(address, None)
                     self._last_processed_at.pop(address, None)
             self._condition.notify_all()
 
@@ -395,20 +388,24 @@ class GestureInferenceWorker(QThread):
             return
 
         while True:
-            sample = self._wait_for_sample()
-            if sample is None:
+            reading = self._wait_for_reading()
+            if reading is None:
                 break
-            if sample is self.RESET_MARKER:
+            if reading is self.RESET_MARKER:
                 self._apply_reset()
                 continue
-            if sample is self.CLEAR_MARKER:
+            if reading is self.CLEAR_MARKER:
                 self._apply_stream_clear()
                 continue
-            address, window_data, event_ts = sample
-            code = self.recognizer.detect_window(address, window_data, event_ts)
-            state = self.recognizer.state_for(address)
-            self._processed_since_stats += 1
-            self.sig_result.emit(address, self._state_payload(state), code)
+            address, batch = reading
+            for window_data, event_ts in batch:
+                code = self.recognizer.detect_window(address, window_data, event_ts)
+                state = self.recognizer.state_for(address)
+                self._processed_since_stats += 1
+                self.sig_result.emit(address, self._state_payload(state), code)
+                if code >= 0:
+                    self._flatten_stream_after_detection(address, window_data[:, -1])
+                    break
             self._emit_stats_if_needed()
 
         self._emit_stats(force=True)
@@ -439,7 +436,7 @@ class GestureInferenceWorker(QThread):
         if clear_addresses:
             self.recognizer.clear_stream_state(clear_addresses)
 
-    def _wait_for_sample(self):
+    def _wait_for_reading(self):
         with self._condition:
             while self._running:
                 if self._reset_requested:
@@ -448,53 +445,88 @@ class GestureInferenceWorker(QThread):
                 if self._clear_all_requested or self._clear_addresses:
                     return self.CLEAR_MARKER
                 now = time.perf_counter()
-                item = self._pop_next_sample_locked(now)
+                item = self._pop_next_reading_locked(now)
                 if item is not None:
                     return item
                 wait_timeout = self._next_wait_timeout_locked(now)
                 self._condition.wait(timeout=wait_timeout)
             return None
 
-    def _pop_next_sample_locked(
+    def _pop_next_reading_locked(
         self, now: float
-    ) -> tuple[str, np.ndarray, float] | None:
+    ) -> tuple[str, list[tuple[np.ndarray, float]]] | None:
         if not self._ring_order:
             return None
 
-        # 每个戒指只保留最新待处理样本，优先降低延迟而不是补算旧帧。
         rounds = len(self._ring_order)
         for _ in range(rounds):
             address = self._ring_order[0]
             self._ring_order.rotate(-1)
-            sample = self._latest_samples.get(address)
-            if sample is None:
+            pending = self._pending_readings.get(address)
+            if not pending:
                 continue
-            window = self._sample_windows.get(address)
-            if window is None or len(window) < self.cfg.window_size:
-                continue
+            take_count = 1 if len(pending) <= self.MAX_ACCEPTABLE_BACKLOG else len(pending)
+            window = self._reading_windows.get(address)
+            window_len = 0 if window is None else len(window)
             if self._mode == self.MODE_TARGET:
-                last_time = self._last_processed_at.get(address, 0.0)
-                interval = 1.0 / self._target_fps
-                if now - last_time < interval:
+                # Warm-up stage should keep filling the sliding window without FPS throttling.
+                if window_len + take_count < self.cfg.window_size:
+                    pass
+                else:
+                    last_time = self._last_processed_at.get(address, 0.0)
+                    interval = 1.0 / self._target_fps
+                    if now - last_time < interval:
+                        continue
+            if window is None:
+                window = deque(maxlen=self.cfg.window_size)
+                self._reading_windows[address] = window
+            batch: list[tuple[np.ndarray, float]] = []
+            for _ in range(take_count):
+                reading = pending.popleft()
+                window.append(reading.data)
+                if len(window) < self.cfg.window_size:
                     continue
-                self._last_processed_at[address] = now
-            self._latest_samples.pop(address, None)
-            window_data = np.asarray(window, dtype=np.float32).T
-            return address, window_data, self._latest_event_ts.get(address, sample.event_ts)
+                batch.append((np.asarray(window, dtype=np.float32).T, reading.event_ts))
+            if not pending:
+                self._pending_readings.pop(address, None)
+            if batch:
+                if self._mode == self.MODE_TARGET:
+                    self._last_processed_at[address] = now
+                return address, batch
         return None
 
+    def _flatten_stream_after_detection(self, address: str, last_frame: np.ndarray) -> None:
+        flattened_frame = np.asarray(last_frame, dtype=np.float32).copy()
+        with self._condition:
+            window = self._reading_windows.get(address)
+            if window is not None and window:
+                maxlen = window.maxlen
+                flattened_window = deque(maxlen=maxlen)
+                for _ in range(len(window)):
+                    flattened_window.append(flattened_frame.copy())
+                self._reading_windows[address] = flattened_window
+
+            pending = self._pending_readings.get(address)
+            if pending:
+                flattened_pending = deque()
+                for reading in pending:
+                    flattened_pending.append(
+                        PendingReading(data=flattened_frame.copy(), event_ts=reading.event_ts)
+                    )
+                self._pending_readings[address] = flattened_pending
+
     def _next_wait_timeout_locked(self, now: float) -> float | None:
-        if self._mode != self.MODE_TARGET or not self._latest_samples:
-            return 0.05
+        if self._mode != self.MODE_TARGET or not self._pending_readings:
+            return 0.001
 
         interval = 1.0 / self._target_fps
         remaining = []
-        for address in self._latest_samples:
+        for address in self._pending_readings:
             last_time = self._last_processed_at.get(address, 0.0)
             remaining.append(max(0.0, interval - (now - last_time)))
         if not remaining:
-            return 0.05
-        return min(min(remaining), 0.05)
+            return 0.001
+        return min(min(remaining), 0.001)
 
     def _emit_stats_if_needed(self) -> None:
         now = time.perf_counter()
@@ -511,7 +543,7 @@ class GestureInferenceWorker(QThread):
             {
                 "recv_fps": self._received_since_stats / elapsed,
                 "infer_fps": self._processed_since_stats / elapsed,
-                "dropped": self._dropped_samples,
+                "dropped": self._dropped_readings,
                 "mode": self._mode,
                 "target_fps": self._target_fps,
             }
@@ -567,14 +599,14 @@ class GestureRecognitionWindow(RingStreamWindowBase):
 
         self.cards: dict[str, RingGestureCard] = {}
         self._stream_connected = False
-        self._worker_ready = False
+        self._worker_ready = False # 初始化
         self._worker_error = ""
         self._subscription_applied = False
 
         self.status_label = QLabel("数据流状态：未连接")
         self.status_label.setObjectName("statusTag")
         self.total_count_label = QLabel("总识别次数: 0")
-        self.rate_label = QLabel("接收: --Hz | 识别: --Hz | 覆盖: 0")
+        self.rate_label = QLabel("接收: --Hz | 识别: --Hz | 丢弃: 0")
         self.rate_label.setProperty("class", "sub-text")
         self.total_count = 0
 
@@ -635,9 +667,6 @@ class GestureRecognitionWindow(RingStreamWindowBase):
 
         mode_title = QLabel("处理模式")
         mode_title.setProperty("class", "settings-title")
-        mode_desc = QLabel("控制识别线程是持续吃满最新样本，还是按指定速率运行。")
-        mode_desc.setProperty("class", "settings-desc")
-        mode_desc.setWordWrap(True)
         mode_switch = QHBoxLayout()
         mode_switch.setSpacing(8)
         self.mode_btn_max = QPushButton("尽可能满帧率")
@@ -668,7 +697,6 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         mode_text = QVBoxLayout()
         mode_text.setSpacing(4)
         mode_text.addWidget(mode_title)
-        mode_text.addWidget(mode_desc)
 
         fps_text = QVBoxLayout()
         fps_text.setSpacing(4)
@@ -681,7 +709,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         settings_layout.addWidget(self.fps_spin, 1, 1)
         settings_layout.setColumnStretch(0, 1)
 
-        self.mode_hint = QLabel("识别始终优先使用最新数据；旧样本会被覆盖以降低延迟。")
+        self.mode_hint = QLabel("识别线程会先缓存逐帧 IMU 数据；积压不大时逐帧处理，积压过大时批量追赶。")
         self.mode_hint.setProperty("class", "sub-text")
         self.mode_hint.setWordWrap(True)
         panel_layout.addWidget(settings_panel)
@@ -770,7 +798,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         infer_fps = float(payload.get("infer_fps", 0.0) or 0.0)
         dropped = int(payload.get("dropped", 0) or 0)
         self.rate_label.setText(
-            f"接收: {recv_fps:.1f}Hz | 识别: {infer_fps:.1f}Hz | 覆盖: {dropped}"
+            f"接收: {recv_fps:.1f}Hz | 识别: {infer_fps:.1f}Hz | 丢弃: {dropped}"
         )
 
     def refresh_status(self):
@@ -831,7 +859,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
             ],
             dtype=np.float32,
         )
-        self.worker.enqueue_sample(address, data, event_ts)
+        self.worker.enqueue_reading(address, data, event_ts)
 
     def on_rings_updated(
         self,
