@@ -19,6 +19,7 @@
   - `apps/imu_visualizer_app.py`（多戒指高性能可视化）
   - `apps/audio_monitor_app.py`（音频解码、播放、保存）
   - `apps/recorder_app.py`（多戒指 IMU/音频录制）
+  - `apps/gesture_recognition_app.py`（手势识别与分戒指可视化计数）
 
 ## 环境要求
 
@@ -43,7 +44,7 @@ uv run python main.py
 启动后你可以：
 
 1. 点击“开始扫描”发现设备
-2. 对单个设备执行连接 / 同步 / 开始录制
+2. 对单个设备执行连接 / 同步
 3. 在主界面底部“应用”栏启动独立应用
 4. 在顶部 `Port` 输入框切换应用数据流端口（运行中可切换）
 5. 使用顶部 `IMU` / `音频` checkbox 控制设备侧流开关
@@ -71,9 +72,11 @@ uv run python main.py
 │   ├── imu_visualizer_app.py       # 示例应用：IMU 可视化
 │   ├── audio_monitor_app.py        # 示例应用：音频监控（解码/播放/保存）
 │   ├── recorder_app.py             # 示例应用：多戒指录制中心
+│   ├── gesture_recognition_app.py  # 示例应用：手势识别与计数
 │   └── common/
 │       ├── __init__.py
-│       └── stream_client.py        # 应用侧通用流客户端
+│       ├── stream_client.py        # 应用侧通用流客户端
+│       └── stream_window.py        # 应用侧流式窗口基类
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -99,8 +102,8 @@ uv run python main.py
 ```json
 {"type":"hello","version":1}
 {"type":"status","rings":[{"address":"...","name":"BCL-01","connected":true}]}
-{"type":"imu","address":"...","name":"BCL-01","timestamp":1710000000.0,"acc":[0.1,0.2,0.3],"gyr":[1.0,2.0,3.0]}
-{"type":"audio","address":"...","name":"BCL-01","timestamp":1710000000.0,"audio_type":1,"sample_rate":16000,"data_b64":"..."}
+{"type":"imu","address":"...","name":"BCL-01","timestamp":12.34,"local_timestamp":12.34,"host_timestamp":123456.78,"acc":[0.1,0.2,0.3],"gyr":[1.0,2.0,3.0]}
+{"type":"audio","address":"...","name":"BCL-01","timestamp":12.34,"local_timestamp":12.34,"host_timestamp":123456.78,"audio_type":1,"sample_rate":16000,"data_b64":"..."}
 {"type":"subscribed","rings":["addr1","addr2"]}
 {"type":"error","message":"unsupported_command"}
 ```
@@ -117,33 +120,75 @@ uv run python main.py
 
 - `rings` 为空列表时默认接收全部
 - `streams` 可选，支持 `imu` / `audio`，不传时默认 `["imu"]`
+- `local_timestamp` 为戒指原始时间戳，`host_timestamp` 为校准后的主机时间戳（未校准时为 `0`）
 - 当前可视化应用为了“未订阅不显示”，会发送占位值避免接收全部
 
 ### 3. 推荐开发步骤
 
 1. 复制 `apps/demo_processor_app.py` 作为新应用起点
-2. 复用 `apps/common/stream_client.py` 处理连接、重连、消息分发
-3. 在应用内实现：
-   - 设备列表渲染（消费 `status`）
-   - 订阅逻辑（发送 `subscribe`）
-   - 数据处理逻辑（消费 `imu`）
-4. 在 `main.py` 的应用栏新增启动按钮
+2. 继承 `apps/common/stream_window.py` 中的 `RingStreamWindowBase`
+3. 复用基类完成：
+   - 连接/重连
+   - `status` 请求与连接状态文案
+   - 戒指列表渲染与多选
+   - 订阅指令拼装（支持“空选择=全部”或“空选择=不订阅”）
+4. 在子类里只实现：
+   - 页面 UI
+   - `handle_stream_message(...)` 的业务数据处理
+   - `on_stream_connected(...)` / `on_rings_updated(...)` 等可选 hook
+5. 在 `main.py` 的应用栏新增启动按钮
 
 ### 4. 最小应用模板
 
 ```python
-from common.stream_client import JsonLineStreamClient
+from PyQt6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
-client = JsonLineStreamClient(host="127.0.0.1", port=17888)
-client.sig_connected.connect(lambda ok: client.send_command({"cmd": "status"}) if ok else None)
-client.sig_message.connect(on_message)
-client.start()
+from common.stream_window import RingStreamWindowBase
 
-# 订阅指定戒指
-client.send_command({"cmd": "subscribe", "rings": ["ring_addr"]})
+
+class YourWindow(RingStreamWindowBase):
+    def __init__(self, host: str, port: int):
+        super().__init__(host=host, port=port)
+        self.status_label = QLabel("数据流状态：未连接")
+        self.apply_btn = QPushButton("应用订阅")
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.addWidget(self.status_label)
+        self.add_ring_selection_panel(layout, title_text="选择戒指")
+        layout.addWidget(self.apply_btn)
+
+        self.set_stream_status_label(self.status_label)
+        self.apply_btn.clicked.connect(self.apply_subscription)
+        self.bind_stream_client_signals()
+        self.client.start()
+
+    def on_stream_connected(self) -> None:
+        self.apply_subscription()
+
+    def handle_stream_message(self, message: dict) -> None:
+        if message.get("type") != "imu":
+            return
+        # 在这里处理 IMU 数据
+
+    def apply_subscription(self) -> None:
+        self.send_subscription(["imu"])
 ```
 
-### 5. 在主界面接入新应用
+### 5. 基类约定
+
+- `set_stream_status_label(label)`：把连接状态输出绑定到某个 `QLabel`
+- `add_ring_selection_panel(layout, title_text=..., max_height=...)`：创建标准戒指选择区
+- `bind_stream_client_signals()`：统一绑定 `connected / message / error`
+- `handle_stream_message(message)`：子类必须实现；只处理非 `status` 的业务消息
+- `on_stream_connected()`：连接成功后触发，适合自动订阅
+- `on_rings_updated(...)`：戒指列表刷新后触发，适合清理本地缓存、刷新卡片
+- `send_subscription(streams, empty_behavior="all")`
+  - `empty_behavior="all"`：不勾选任何戒指时订阅全部
+  - `empty_behavior="none"`：不勾选任何戒指时不订阅任何设备，适合“先选后看”的页面
+
+### 6. 在主界面接入新应用
 
 在 `main.py` 中复用现有 `launch_app(...)` 方式新增按钮：
 
@@ -154,7 +199,7 @@ client.send_command({"cmd": "subscribe", "rings": ["ring_addr"]})
 uv run python apps/your_app.py --host 127.0.0.1 --port 17888
 ```
 
-### 6. 应用开发建议
+### 7. 应用开发建议
 
 - 不在应用里直接连 BLE；BLE 统一由主程序管理
 - 处理高频流时使用环形缓冲和定时重绘
@@ -172,6 +217,7 @@ uv run python apps/demo_processor_app.py --host 127.0.0.1 --port 17888
 uv run python apps/imu_visualizer_app.py --host 127.0.0.1 --port 17888
 uv run python apps/audio_monitor_app.py --host 127.0.0.1 --port 17888
 uv run python apps/recorder_app.py --host 127.0.0.1 --port 17888
+uv run python apps/gesture_recognition_app.py --host 127.0.0.1 --port 17888
 
 # 检查语法
 python -m compileall main.py core apps

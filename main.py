@@ -106,6 +106,7 @@ class RingDevice:
         self.name = name
         self.is_connected = False
         self.is_recording = False
+        self.is_calibrated = False
 
         # 逻辑成员
         self.ring_logic: BLERing | None = None
@@ -194,6 +195,8 @@ class DeviceService:
             raise Exception("设备未连接")
 
         ring = device.ring_logic
+        ring.reset_time_calib_data()
+        ring.clear_time_calibration()
 
         calib_packet_num = 300
         calib_packet_interval = 0.1
@@ -246,8 +249,12 @@ class DeviceService:
         if progress_callback:
             progress_callback(calib_packet_num, calib_packet_num)  # end
 
+        if len(timestamps) < 20:
+            raise Exception("校准数据不足，可能同步失败，最好重新同步")
+
         # save
         os.makedirs("data", exist_ok=True)
+        ring.set_time_calibration(intercept, slope)
         with open(f"data/calib_time_{int(time.time())}.json", "w") as f:
             json.dump(
                 {
@@ -257,12 +264,85 @@ class DeviceService:
                     "ring_timestamps": ring_timestamps.tolist(),
                     "pc_delta_time": pc_delta_time.tolist(),
                     "ring_mac": ring.address,
+                    "saved_perf_counter": time.perf_counter(),
+                    "saved_epoch": time.time(),
                 },
                 f,
             )
 
-        if len(timestamps) < 20:
-            raise Exception("校准数据不足，可能同步失败，最好重新同步")
+    @staticmethod
+    def find_latest_calib_record(ring_mac: str) -> dict | None:
+        data_dir = Path("data")
+        if not data_dir.exists():
+            return None
+        files = sorted(
+            data_dir.glob("calib_time_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for file in files:
+            try:
+                with open(file, "r") as f:
+                    payload = json.load(f)
+                if str(payload.get("ring_mac", "")).lower() == ring_mac.lower():
+                    payload["__file"] = str(file)
+                    return payload
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    async def load_calib_if_consistent(
+        device: RingDevice, tolerance_ms: float = 8.0
+    ) -> tuple[bool, str]:
+        if device.ring_logic is None:
+            return False, "无设备逻辑"
+        ring = device.ring_logic
+        record = DeviceService.find_latest_calib_record(ring.address)
+        if record is None:
+            ring.clear_time_calibration()
+            return False, "未找到历史校准记录"
+
+        try:
+            intercept = float(record["intercept"])
+            slope = float(record["slope"])
+        except Exception:
+            ring.clear_time_calibration()
+            return False, "历史校准记录格式错误"
+
+        if abs(slope) < 1e-12:
+            ring.clear_time_calibration()
+            return False, "历史校准 slope 无效"
+
+        ring.reset_time_calib_data()
+
+        calib_packet_num = 3
+        calib_packet_interval = 0.1
+        cnt = 0
+
+        for _ in trange(calib_packet_num):
+            await device.ring_logic.calib_time(index=cnt)
+            await asyncio.sleep(calib_packet_interval)
+            cnt += 1
+        await asyncio.sleep(1)
+
+        ring.start_calib_timestamps = np.sort(ring.start_calib_timestamps)
+        ring.end_calib_timestamps = np.sort(ring.end_calib_timestamps)
+        ring.ring_timestamps = np.sort(ring.ring_timestamps)
+        ring.end_indices = np.sort(np.array(ring.end_indices))
+        ring.start_calib_timestamps = ring.start_calib_timestamps[ring.end_indices]
+        assert len(ring.start_calib_timestamps) == len(ring.ring_timestamps)
+        assert len(ring.end_calib_timestamps) == len(ring.ring_timestamps)
+
+        expected_host_ts = intercept + slope * ring.ring_timestamps
+        current_host_ts = (ring.start_calib_timestamps + ring.end_calib_timestamps) / 2
+        delta_ms = np.mean(np.abs(current_host_ts - expected_host_ts)) * 1000.0
+        if delta_ms <= tolerance_ms:
+            ring.set_time_calibration(intercept, slope)
+            return True, f"已加载历史校准（偏差 {delta_ms:.2f}ms）"
+
+        ring.clear_time_calibration()
+        return False, f"历史校准失效（偏差 {delta_ms:.2f}ms），请手动同步"
 
 
 # ============================================================================
@@ -371,7 +451,9 @@ class DeviceCard(QFrame):
 
         if self.device.is_connected:
             self.setProperty("class", "device-card-connected")
-            self.lbl_status.setText("● 已连接")
+            self.lbl_status.setText(
+                f"● 已连接（{'已校准' if self.device.is_calibrated else '未校准'}）"
+            )
             self.lbl_status.setStyleSheet("color: #e53e3e; font-weight: bold;")
 
             self.btn_connect.setText("断开")
@@ -513,6 +595,13 @@ class MainWindow(QMainWindow):
             lambda: self.launch_app("apps/recorder_app.py", "录制中心")
         )
         apps_row.addWidget(btn_recorder)
+
+        btn_gesture = QPushButton("手势识别")
+        btn_gesture.setProperty("class", "btn-primary")
+        btn_gesture.clicked.connect(
+            lambda: self.launch_app("apps/gesture_recognition_app.py", "手势识别")
+        )
+        apps_row.addWidget(btn_gesture)
         apps_row.addStretch()
         main_layout.addLayout(apps_row)
 
@@ -667,8 +756,8 @@ class MainWindow(QMainWindow):
                     imu_callback=lambda _, imu, address=addr: self.handle_imu_data(
                         address, imu
                     ),
-                    audio_callback=lambda _, audio_type, audio, address=addr: self.handle_audio_data(
-                        address, audio_type, audio
+                    audio_callback=lambda _, audio_type, audio, local_ts, host_ts, address=addr: self.handle_audio_data(
+                        address, audio_type, audio, local_ts, host_ts
                     ),
                     update_view_callback=lambda address: self.refresh_card(address),
                 )
@@ -700,10 +789,16 @@ class MainWindow(QMainWindow):
             device.is_connected = ring_connected
             if not ring_connected:
                 device.is_recording = False
+                device.is_calibrated = False
                 self.lbl_msg.setText(f"{device.name} 已自动断开")
             self.stream_hub.upsert_ring(
                 device.address, device.name, connected=device.is_connected
             )
+
+        ring = device.ring_logic
+        device.is_calibrated = bool(
+            ring is not None and getattr(ring, "is_time_calibrated", False)
+        )
 
         if address in self.cards:
             self.cards[address].refresh_view()
@@ -715,7 +810,8 @@ class MainWindow(QMainWindow):
         self.stream_hub.publish_imu(
             address=address,
             name=device.name,
-            timestamp=time.time(),
+            local_timestamp=float(getattr(imu, "local_timestamp", 0.0)),
+            host_timestamp=float(getattr(imu, "host_timestamp", 0.0)),
             acc_x=imu.acc_x,
             acc_y=imu.acc_y,
             acc_z=imu.acc_z,
@@ -724,14 +820,22 @@ class MainWindow(QMainWindow):
             gyr_z=imu.gyr_z,
         )
 
-    def handle_audio_data(self, address: str, audio_type: int, audio: bytes):
+    def handle_audio_data(
+        self,
+        address: str,
+        audio_type: int,
+        audio: bytes,
+        local_timestamp: float,
+        host_timestamp: float,
+    ):
         device = self.devices.get(address)
         if device is None:
             return
         self.stream_hub.publish_audio(
             address=address,
             name=device.name,
-            timestamp=time.time(),
+            local_timestamp=local_timestamp,
+            host_timestamp=host_timestamp,
             audio_type=audio_type,
             audio_bytes=bytes(audio),
         )
@@ -773,6 +877,7 @@ class MainWindow(QMainWindow):
                     self.lbl_msg.setText(f"正在断开 {device.name}...")
                     await DeviceService.disconnect_device(device)
                     device.is_connected = False
+                    device.is_calibrated = False
                     self.stream_hub.upsert_ring(
                         device.address, device.name, connected=False
                     )
@@ -781,21 +886,30 @@ class MainWindow(QMainWindow):
                     self.lbl_msg.setText(f"正在连接 {device.name}...")
                     await DeviceService.connect_device(device)
                     device.is_connected = True
+                    device.is_calibrated = False
                     await self.apply_stream_mode_to_device(
                         device=device,
                         enabled_imu=self.chk_imu_stream.isChecked(),
                         enabled_audio=self.chk_audio_stream.isChecked(),
                     )
+                    loaded, calib_msg = await DeviceService.load_calib_if_consistent(
+                        device
+                    )
+                    device.is_calibrated = loaded
                     self.stream_hub.upsert_ring(
                         device.address, device.name, connected=True
                     )
-                    self.lbl_msg.setText(f"{device.name} 连接成功")
+                    if loaded:
+                        self.lbl_msg.setText(f"{device.name} 连接成功，{calib_msg}")
+                    else:
+                        self.lbl_msg.setText(f"{device.name} 连接成功，未同步（{calib_msg}）")
 
             elif action == "sync":
                 self.lbl_msg.setText(f"正在同步 {device.name}...")
                 await DeviceService.sync_time(
                     device, progress_callback=card.update_progress
                 )
+                device.is_calibrated = True
                 self.lbl_msg.setText(f"{device.name} 同步完成")
 
         except Exception as e:

@@ -15,14 +15,12 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMainWindow,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from common.stream_client import JsonLineStreamClient
+from common.stream_window import RingStreamWindowBase
 
 STYLE_SHEET = """
 QMainWindow { background-color: #f6f8fb; }
@@ -47,9 +45,6 @@ QLabel { font-size: 13px; color: #334155; }
 QLabel.title { font-size: 18px; font-weight: 700; color: #0f172a; }
 QLabel.sub-text { font-size: 12px; color: #64748b; }
 """
-
-NONE_SUBSCRIPTION = "__none__"
-
 
 class AdpcmDecoder:
     index_table = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
@@ -102,15 +97,11 @@ class AdpcmDecoder:
         return bytes(pcm)
 
 
-class RecorderWindow(QMainWindow):
+class RecorderWindow(RingStreamWindowBase):
     def __init__(self, host: str, port: int):
-        super().__init__()
+        super().__init__(host=host, port=port)
         self.setWindowTitle("录制中心")
         self.resize(940, 680)
-
-        self.client = JsonLineStreamClient(host=host, port=port)
-        self.ring_boxes: dict[str, QCheckBox] = {}
-        self.ring_names: dict[str, str] = {}
 
         self.recording = False
         self.record_start_ts = 0
@@ -122,6 +113,7 @@ class RecorderWindow(QMainWindow):
         self.metric_label = QLabel("就绪")
 
         self._build_ui()
+        self.set_stream_status_label(self.status_label)
         self._bind_signals()
         self.client.start()
 
@@ -147,19 +139,11 @@ class RecorderWindow(QMainWindow):
         panel_layout.addWidget(desc)
         panel_layout.addWidget(self.status_label)
 
-        ring_title = QLabel("选择要录制的戒指（不勾选表示全部）")
-        ring_title.setProperty("class", "sub-text")
-        panel_layout.addWidget(ring_title)
-
-        ring_scroll = QScrollArea()
-        ring_scroll.setWidgetResizable(True)
-        ring_scroll.setStyleSheet("border: none;")
-        ring_content = QWidget()
-        self.ring_layout = QVBoxLayout(ring_content)
-        self.ring_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        ring_scroll.setWidget(ring_content)
-        ring_scroll.setMaximumHeight(180)
-        panel_layout.addWidget(ring_scroll)
+        self.add_ring_selection_panel(
+            panel_layout,
+            title_text="选择要录制的戒指（不勾选表示全部）",
+            max_height=180,
+        )
 
         stream_row = QHBoxLayout()
         self.chk_imu = QCheckBox("录制 IMU")
@@ -189,27 +173,13 @@ class RecorderWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_recording)
         self.btn_stop.clicked.connect(self.stop_recording)
 
-        self.client.sig_connected.connect(self.on_connected_changed)
-        self.client.sig_message.connect(self.on_message)
-        self.client.sig_error.connect(self.on_error)
+        self.bind_stream_client_signals()
 
-    def on_connected_changed(self, connected: bool):
-        self.status_label.setText(f"数据流状态：{'已连接' if connected else '未连接'}")
-        if connected:
-            self.client.send_command({"cmd": "status"})
-            self.client.send_command(
-                {"cmd": "subscribe", "rings": [NONE_SUBSCRIPTION], "streams": ["imu"]}
-            )
+    def on_stream_connected(self) -> None:
+        self.send_subscription(["imu"], empty_behavior="none")
 
-    def on_error(self, message: str):
-        self.status_label.setText(f"数据流状态：异常（{message}）")
-
-    def on_message(self, message: dict):
+    def handle_stream_message(self, message: dict):
         msg_type = message.get("type")
-        if msg_type == "status":
-            self.sync_rings(message.get("rings", []))
-            return
-
         if not self.recording:
             return
 
@@ -217,32 +187,6 @@ class RecorderWindow(QMainWindow):
             self.on_imu_message(message)
         elif msg_type == "audio" and self.chk_audio.isChecked():
             self.on_audio_message(message)
-
-    def sync_rings(self, rings: list[dict]):
-        ring_map = {str(item.get("address", "")): item for item in rings}
-
-        for address in list(self.ring_boxes.keys()):
-            if address not in ring_map:
-                box = self.ring_boxes.pop(address)
-                box.setParent(None)
-                self.ring_names.pop(address, None)
-
-        for address, ring in ring_map.items():
-            if not address:
-                continue
-            if address not in self.ring_boxes:
-                box = QCheckBox()
-                box.setChecked(False)
-                self.ring_boxes[address] = box
-                self.ring_layout.addWidget(box)
-            box = self.ring_boxes[address]
-            ring_name = str(ring.get("name", "Unknown"))
-            self.ring_names[address] = ring_name
-            connected = bool(ring.get("connected", False))
-            box.setText(f"{ring_name} | {address} | {'在线' if connected else '离线'}")
-
-    def selected_rings(self) -> list[str]:
-        return [addr for addr, box in self.ring_boxes.items() if box.isChecked()]
 
     def selected_streams(self) -> list[str]:
         streams = []
@@ -258,7 +202,7 @@ class RecorderWindow(QMainWindow):
             self.metric_label.setText("请至少选择一种录制数据（IMU 或音频）")
             return
 
-        rings = self.selected_rings()
+        rings = self.build_subscription_rings()
         self.client.send_command({"cmd": "subscribe", "rings": rings, "streams": streams})
 
         self.record_start_ts = int(time.time())
@@ -278,9 +222,7 @@ class RecorderWindow(QMainWindow):
             return
         self.recording = False
 
-        self.client.send_command(
-            {"cmd": "subscribe", "rings": [NONE_SUBSCRIPTION], "streams": ["imu"]}
-        )
+        self.send_subscription(["imu"], empty_behavior="none")
 
         saved = self.save_records()
 
@@ -298,9 +240,9 @@ class RecorderWindow(QMainWindow):
             return
         if len(acc) != 3 or len(gyr) != 3:
             return
-        timestamp = float(message.get("timestamp", time.time()))
-
-        row = [timestamp] + [float(v) for v in acc] + [float(v) for v in gyr]
+        local_ts = float(message.get("local_timestamp", 0.0) or 0.0)
+        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
+        row = [local_ts, host_ts] + [float(v) for v in acc] + [float(v) for v in gyr]
         self.imu_records.setdefault(address, []).append(row)
 
     def on_audio_message(self, message: dict):
@@ -332,7 +274,7 @@ class RecorderWindow(QMainWindow):
             for address, rows in self.imu_records.items():
                 if not rows:
                     continue
-                ring_name = self.ring_names.get(address, "Unknown")
+                ring_name = str(self.ring_info.get(address, {}).get("name", "Unknown"))
                 safe_name = self._safe_name(ring_name)
                 filename = f"data/{safe_name}_{address}_{start_ts}.npy"
                 np.save(filename, np.asarray(rows, dtype=np.float64))
@@ -343,7 +285,7 @@ class RecorderWindow(QMainWindow):
             for address, pcm in self.audio_pcm.items():
                 if not pcm:
                     continue
-                ring_name = self.ring_names.get(address, "Unknown")
+                ring_name = str(self.ring_info.get(address, {}).get("name", "Unknown"))
                 safe_name = self._safe_name(ring_name)
                 filename = f"data/{safe_name}_{address}_{start_ts}.wav"
                 with wave.open(filename, "wb") as wavfile:

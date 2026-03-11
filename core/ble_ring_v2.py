@@ -105,6 +105,8 @@ class IMUData:
         gyr_y: float,
         gyr_z: float,
         timestamp: float,
+        local_timestamp: float | None = None,
+        host_timestamp: float | None = None,
     ):
         self.acc_x = acc_x
         self.acc_y = acc_y
@@ -112,7 +114,10 @@ class IMUData:
         self.gyr_x = gyr_x
         self.gyr_y = gyr_y
         self.gyr_z = gyr_z
-        self.timestamp = timestamp
+        self.local_timestamp = timestamp if local_timestamp is None else local_timestamp
+        self.host_timestamp = 0.0 if host_timestamp is None else float(host_timestamp)
+        # backward-compatible alias
+        self.timestamp = self.local_timestamp
         self.acc_np = np.array([self.acc_x, self.acc_y, self.acc_z])
         self.gyr_np = np.array([self.gyr_x, self.gyr_y, self.gyr_z])
         self.imu_np = np.concatenate((self.acc_np, self.gyr_np), axis=0)
@@ -161,7 +166,9 @@ class IMUData:
             self.gyr_x / math.pi * 180,
             -self.gyr_y / math.pi * 180,
             -self.gyr_z / math.pi * 180,
-            self.timestamp,
+            self.local_timestamp,
+            self.local_timestamp,
+            self.host_timestamp,
         )
 
     def direction(self):
@@ -188,7 +195,7 @@ class IMUData:
                 self.gyr_x,
                 self.gyr_y,
                 self.gyr_z,
-                self.timestamp,
+                self.local_timestamp,
             ],
             dtype=np.float64,
         )
@@ -282,6 +289,9 @@ class BLERing:
         self.audio_fps = 0.0
         self.audio_fps_start_time = None
         self.audio_fps_count = 0
+        self.time_calib_intercept = 0.0
+        self.time_calib_slope = 0.0
+        self.is_time_calibrated = False
 
     def on_disconnect(self, clients):
         _ = clients
@@ -293,6 +303,7 @@ class BLERing:
         self.audio_fps_count = 0
         self.imu_fps_start_time = None
         self.audio_fps_start_time = None
+        self.is_time_calibrated = False
         if self.update_view_callback is not None:
             self.update_view_callback(self.address)
 
@@ -346,11 +357,12 @@ class BLERing:
                         gyr_z / gyr_scale,
                     )
                     if imu_start_time != 0 and imu_end_time != 0:
-                        timestamp = imu_start_time + (
+                        local_timestamp = (imu_start_time + (
                             (imu_end_time - imu_start_time) / (imu_packet_num - 1)
                         ) * ((i - head_length) // 12)
+                        ) / 16384.0
                     else:
-                        timestamp = time.perf_counter()
+                        local_timestamp = 0.0
                     imu = IMUData(
                         -1 * acc_y,
                         acc_z,
@@ -358,7 +370,9 @@ class BLERing:
                         -1 * gyr_y - bias[0],
                         gyr_z - bias[1],
                         -1 * gyr_x - bias[2],
-                        timestamp,
+                        local_timestamp,
+                        local_timestamp,
+                        self.to_host_timestamp(local_timestamp),
                     )
                     imu_data.append(imu)
 
@@ -417,15 +431,33 @@ class BLERing:
         elif data[2] == 0x71 and data[3] == 0x0:
             audio_type = 0
             audio = data[-200:]
+            local_timestamp = 0.0
+            if len(data) >= 8:
+                local_timestamp = struct.unpack("i", data[4:8])[0] / 16384.0
             if self.audio_callback is not None:
-                self.audio_callback(self.index, audio_type, audio)
+                self.audio_callback(
+                    self.index,
+                    audio_type,
+                    audio,
+                    local_timestamp,
+                    self.to_host_timestamp(local_timestamp),
+                )
             self.update_audio_fps()
 
         elif data[2] == 0x71 and data[3] == 0x1:
             audio_type = 1
             audio = data[-200:]
+            local_timestamp = 0.0
+            if len(data) >= 8:
+                local_timestamp = struct.unpack("i", data[4:8])[0] / 16384.0
             if self.audio_callback is not None:
-                self.audio_callback(self.index, audio_type, audio)
+                self.audio_callback(
+                    self.index,
+                    audio_type,
+                    audio,
+                    local_timestamp,
+                    self.to_host_timestamp(local_timestamp),
+                )
             self.update_audio_fps()
 
         elif data[2] == 0x97 and data[3] == 0x0:
@@ -565,6 +597,24 @@ class BLERing:
             if self.update_view_callback is not None:
                 self.update_view_callback(self.address)
 
+    def set_time_calibration(self, intercept: float, slope: float):
+        self.time_calib_intercept = float(intercept)
+        self.time_calib_slope = float(slope)
+        self.is_time_calibrated = True
+        if self.update_view_callback is not None:
+            self.update_view_callback(self.address)
+
+    def clear_time_calibration(self):
+        self.time_calib_intercept = 0.0
+        self.time_calib_slope = 0.0
+        self.is_time_calibrated = False
+        if self.update_view_callback is not None:
+            self.update_view_callback(self.address)
+
+    def to_host_timestamp(self, local_timestamp: float) -> float:
+        if not self.is_time_calibrated or local_timestamp <= 0:
+            return 0.0
+        return self.time_calib_intercept + self.time_calib_slope * local_timestamp
 
 async def connect():
     coroutines = []
@@ -573,7 +623,7 @@ async def connect():
         ring_addr,
         index=0,
         imu_callback=lambda idx, imu: print(f"[Ring {idx}] {imu}"),
-        audio_callback=lambda idx, t, audio: print(
+        audio_callback=lambda idx, t, audio, *_: print(
             f"[Ring {idx}] Audio type {t} length {len(audio)}"
         ),
     )

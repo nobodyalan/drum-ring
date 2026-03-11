@@ -14,14 +14,12 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMainWindow,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from common.stream_client import JsonLineStreamClient
+from common.stream_window import RingStreamWindowBase
 
 try:
     from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
@@ -153,17 +151,15 @@ class AudioPlayer:
             self._sink.stop()
 
 
-class AudioMonitorWindow(QMainWindow):
+class AudioMonitorWindow(RingStreamWindowBase):
     def __init__(self, host: str, port: int):
-        super().__init__()
+        super().__init__(host=host, port=port)
         self.setWindowTitle("音频监控应用")
         self.resize(900, 620)
 
-        self.client = JsonLineStreamClient(host=host, port=port)
         self.decoder = AdpcmDecoder()
         self.player = AudioPlayer(sample_rate=16000)
 
-        self.ring_boxes: dict[str, QCheckBox] = {}
         self.decoded_pcm = bytearray()
         self.packet_count = 0
         self.sample_count = 0
@@ -177,6 +173,7 @@ class AudioMonitorWindow(QMainWindow):
         self.metric_label = QLabel("音频包: 0 | 样本数: 0")
 
         self._build_ui()
+        self.set_stream_status_label(self.status_label)
         self._bind_signals()
         self.client.start()
 
@@ -207,19 +204,11 @@ class AudioMonitorWindow(QMainWindow):
             warn.setProperty("class", "sub-text")
             panel_layout.addWidget(warn)
 
-        ring_title = QLabel("选择订阅戒指（不勾选表示接收全部）")
-        ring_title.setProperty("class", "sub-text")
-        panel_layout.addWidget(ring_title)
-
-        ring_scroll = QScrollArea()
-        ring_scroll.setWidgetResizable(True)
-        ring_scroll.setStyleSheet("border: none;")
-        ring_content = QWidget()
-        self.ring_layout = QVBoxLayout(ring_content)
-        self.ring_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        ring_scroll.setWidget(ring_content)
-        ring_scroll.setMaximumHeight(160)
-        panel_layout.addWidget(ring_scroll)
+        self.add_ring_selection_panel(
+            panel_layout,
+            title_text="选择订阅戒指（不勾选表示接收全部）",
+            max_height=160,
+        )
 
         options = QHBoxLayout()
         self.play_checkbox = QCheckBox("实时播放")
@@ -259,26 +248,13 @@ class AudioMonitorWindow(QMainWindow):
         self.save_btn.clicked.connect(self.save_audio)
         self.clear_btn.clicked.connect(self.clear_audio_cache)
 
-        self.client.sig_connected.connect(self.on_connected_changed)
-        self.client.sig_message.connect(self.on_message)
-        self.client.sig_error.connect(self.on_error)
+        self.bind_stream_client_signals()
 
-    def on_connected_changed(self, connected: bool):
-        self.status_label.setText(f"数据流状态：{'已连接' if connected else '未连接'}")
-        if connected:
-            self.client.send_command({"cmd": "status"})
-            self.apply_subscription()
+    def on_stream_connected(self) -> None:
+        self.apply_subscription()
 
-    def on_error(self, message: str):
-        self.status_label.setText(f"数据流状态：异常（{message}）")
-
-    def on_message(self, message: dict):
-        msg_type = message.get("type")
-        if msg_type == "status":
-            self.sync_rings(message.get("rings", []))
-            return
-
-        if msg_type != "audio":
+    def handle_stream_message(self, message: dict):
+        if message.get("type") != "audio":
             return
 
         audio_type = int(message.get("audio_type", -1))
@@ -338,37 +314,8 @@ class AudioMonitorWindow(QMainWindow):
             )
         )
 
-    def sync_rings(self, rings: list[dict]):
-        ring_map = {str(item.get("address", "")): item for item in rings}
-
-        for address in list(self.ring_boxes.keys()):
-            if address not in ring_map:
-                box = self.ring_boxes.pop(address)
-                box.setParent(None)
-
-        for address, ring in ring_map.items():
-            if not address:
-                continue
-            if address in self.ring_boxes:
-                box = self.ring_boxes[address]
-            else:
-                box = QCheckBox()
-                box.setChecked(False)
-                self.ring_boxes[address] = box
-                self.ring_layout.addWidget(box)
-            ring_name = ring.get("name", "Unknown")
-            connected = bool(ring.get("connected", False))
-            box.setText(f"{ring_name} | {address} | {'在线' if connected else '离线'}")
-
     def apply_subscription(self):
-        selected = [addr for addr, box in self.ring_boxes.items() if box.isChecked()]
-        self.client.send_command(
-            {
-                "cmd": "subscribe",
-                "rings": selected,
-                "streams": ["audio"],
-            }
-        )
+        self.send_subscription(["audio"])
 
     def clear_audio_cache(self):
         self.decoded_pcm.clear()

@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMainWindow,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -23,7 +22,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from common.stream_client import JsonLineStreamClient
+from common.stream_window import RingStreamWindowBase
 
 STYLE_SHEET = """
 QMainWindow { background-color: #f6f8fb; }
@@ -99,9 +98,6 @@ QLabel#valuePill {
 
 ACC_AXIS_COLORS = [QColor("#E53E3E"), QColor("#F59E0B"), QColor("#10B981")]
 GYR_AXIS_COLORS = [QColor("#2563EB"), QColor("#7C3AED"), QColor("#EC4899")]
-NONE_SUBSCRIPTION = "__none__"
-
-
 @dataclass
 class RingBuffer:
     capacity: int = 12000
@@ -375,15 +371,12 @@ class RingPlotCard(QFrame):
         return label
 
 
-class ImuVisualizerWindow(QMainWindow):
+class ImuVisualizerWindow(RingStreamWindowBase):
     def __init__(self, host: str, port: int):
-        super().__init__()
+        super().__init__(host=host, port=port)
         self.setWindowTitle("高性能 IMU 可视化")
         self.resize(1240, 800)
 
-        self.client = JsonLineStreamClient(host=host, port=port)
-        self.ring_boxes: dict[str, QCheckBox] = {}
-        self.ring_info: dict[str, dict] = {}
         self.buffers: dict[str, RingBuffer] = {}
         self.cards: dict[str, RingPlotCard] = {}
 
@@ -391,6 +384,7 @@ class ImuVisualizerWindow(QMainWindow):
         self.status_label.setObjectName("statusTag")
 
         self._build_ui()
+        self.set_stream_status_label(self.status_label)
         self._bind_signals()
         self.on_scale_controls_changed()
 
@@ -423,21 +417,13 @@ class ImuVisualizerWindow(QMainWindow):
         top_layout.addWidget(subtitle)
         top_layout.addWidget(self.status_label)
 
-        ring_title = QLabel("选择订阅戒指")
-        ring_title.setProperty("class", "sub-text")
-        top_layout.addWidget(ring_title)
-
-        ring_scroll = QScrollArea()
-        ring_scroll.setWidgetResizable(True)
-        ring_content = QWidget()
-        self.ring_layout = QVBoxLayout(ring_content)
-        self.ring_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ring_scroll = self.add_ring_selection_panel(
+            top_layout,
+            title_text="选择订阅戒指",
+            max_height=150,
+        )
         self.ring_layout.setSpacing(8)
         self.ring_layout.setContentsMargins(8, 8, 8, 8)
-        ring_scroll.setWidget(ring_content)
-        ring_scroll.setMaximumHeight(150)
-        ring_scroll.setStyleSheet("border: none;")
-        top_layout.addWidget(ring_scroll)
 
         controls = QGridLayout()
         controls.setHorizontalSpacing(10)
@@ -507,18 +493,10 @@ class ImuVisualizerWindow(QMainWindow):
         self.acc_scale_input.valueChanged.connect(self.on_scale_controls_changed)
         self.gyr_scale_input.valueChanged.connect(self.on_scale_controls_changed)
 
-        self.client.sig_connected.connect(self.on_connected_changed)
-        self.client.sig_message.connect(self.on_message)
-        self.client.sig_error.connect(self.on_error)
+        self.bind_stream_client_signals()
 
-    def on_connected_changed(self, connected: bool) -> None:
-        self.status_label.setText(f"数据流状态：{'已连接' if connected else '未连接'}")
-        if connected:
-            self.client.send_command({"cmd": "status"})
-            self.apply_subscription()
-
-    def on_error(self, message: str) -> None:
-        self.status_label.setText(f"数据流状态：异常（{message}）")
+    def on_stream_connected(self) -> None:
+        self.apply_subscription()
 
     def on_window_changed(self, value: int) -> None:
         self.window_label.setText(f"{value}s")
@@ -536,13 +514,8 @@ class ImuVisualizerWindow(QMainWindow):
                 gyr_scale=float(self.gyr_scale_input.value()),
             )
 
-    def on_message(self, message: dict) -> None:
-        msg_type = message.get("type")
-        if msg_type == "status":
-            self._sync_rings(message.get("rings", []))
-            return
-
-        if msg_type != "imu":
+    def handle_stream_message(self, message: dict) -> None:
+        if message.get("type") != "imu":
             return
 
         address = str(message.get("address", ""))
@@ -550,7 +523,8 @@ class ImuVisualizerWindow(QMainWindow):
             return
         acc_raw = message.get("acc")
         gyr_raw = message.get("gyr")
-        timestamp = float(message.get("timestamp", time.time()))
+        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
+        timestamp = host_ts if host_ts > 0 else time.time()
         if not isinstance(acc_raw, list) or not isinstance(gyr_raw, list):
             return
         if len(acc_raw) != 3 or len(gyr_raw) != 3:
@@ -563,34 +537,20 @@ class ImuVisualizerWindow(QMainWindow):
             self.buffers[address] = RingBuffer()
         self.buffers[address].append(timestamp, acc, gyr)
 
-    def _sync_rings(self, rings: list[dict]) -> None:
-        ring_map = {str(item.get("address", "")): item for item in rings}
-        self.ring_info = ring_map
-
-        for address in list(self.ring_boxes.keys()):
-            if address not in ring_map:
-                box = self.ring_boxes.pop(address)
-                box.setParent(None)
-
-        for address, ring in ring_map.items():
-            if not address:
-                continue
-            if address in self.ring_boxes:
-                box = self.ring_boxes[address]
-            else:
-                box = QCheckBox()
-                box.setChecked(False)
-                self.ring_boxes[address] = box
-                self.ring_layout.addWidget(box)
-
-            ring_name = ring.get("name", "Unknown")
-            connected = bool(ring.get("connected", False))
-            box.setText(f"{ring_name} | {address} | {'在线' if connected else '离线'}")
-
+    def on_rings_updated(
+        self,
+        *,
+        rings: list[dict],
+        removed_addresses: list[str],
+        changed_connection_addresses: list[str],
+    ) -> None:
+        _ = rings
+        _ = removed_addresses
+        _ = changed_connection_addresses
         self._refresh_cards()
 
     def _selected_addresses(self) -> list[str]:
-        return [addr for addr, box in self.ring_boxes.items() if box.isChecked()]
+        return self.selected_ring_addresses()
 
     def _effective_addresses(self) -> list[str]:
         return self._selected_addresses()
@@ -626,11 +586,7 @@ class ImuVisualizerWindow(QMainWindow):
         self.empty_hint.setVisible(len(target) == 0)
 
     def apply_subscription(self) -> None:
-        selected = self._selected_addresses()
-        rings = selected if selected else [NONE_SUBSCRIPTION]
-        self.client.send_command(
-            {"cmd": "subscribe", "rings": rings, "streams": ["imu"]}
-        )
+        self.send_subscription(["imu"], empty_behavior="none")
         self._refresh_cards()
 
     def refresh_plots(self) -> None:

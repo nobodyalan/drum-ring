@@ -9,15 +9,12 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMainWindow,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
-    QCheckBox,
 )
 
-from common.stream_client import JsonLineStreamClient
+from common.stream_window import RingStreamWindowBase
 
 STYLE_SHEET = """
 QMainWindow { background-color: #f2f3f5; }
@@ -85,20 +82,19 @@ class DemoImuProcessor(BaseImuProcessor):
         }
 
 
-class DemoProcessorWindow(QMainWindow):
+class DemoProcessorWindow(RingStreamWindowBase):
     def __init__(self, host: str, port: int):
-        super().__init__()
+        super().__init__(host=host, port=port)
         self.setWindowTitle("示范应用 - 数据处理模板")
         self.resize(820, 560)
 
-        self.client = JsonLineStreamClient(host=host, port=port)
         self.processor: BaseImuProcessor = DemoImuProcessor()
-        self.ring_boxes: dict[str, QCheckBox] = {}
 
         self.status_text = QLabel("数据流状态：未连接")
         self.metrics_text = QLabel("包数: 0\nEMA(acc): --\nEMA(gyr): --")
 
         self._build_ui()
+        self.set_stream_status_label(self.status_text)
         self._bind_signals()
         self.client.start()
 
@@ -120,17 +116,10 @@ class DemoProcessorWindow(QMainWindow):
         panel_layout.addWidget(desc)
         panel_layout.addWidget(self.status_text)
 
-        ring_title = QLabel("选择要订阅的戒指（不勾选表示接收全部）")
-        ring_title.setProperty("class", "sub-text")
-        panel_layout.addWidget(ring_title)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_content = QWidget()
-        self.ring_layout = QVBoxLayout(scroll_content)
-        self.ring_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        scroll.setWidget(scroll_content)
-        panel_layout.addWidget(scroll)
+        self.add_ring_selection_panel(
+            panel_layout,
+            title_text="选择要订阅的戒指（不勾选表示接收全部）",
+        )
 
         control_row = QHBoxLayout()
         self.btn_apply = QPushButton("应用订阅")
@@ -145,26 +134,13 @@ class DemoProcessorWindow(QMainWindow):
 
     def _bind_signals(self) -> None:
         self.btn_apply.clicked.connect(self.apply_subscription)
-        self.client.sig_connected.connect(self.on_connected_changed)
-        self.client.sig_message.connect(self.on_message)
-        self.client.sig_error.connect(self.on_error)
+        self.bind_stream_client_signals()
 
-    def on_connected_changed(self, connected: bool) -> None:
-        self.status_text.setText(f"数据流状态：{'已连接' if connected else '未连接'}")
-        if connected:
-            self.client.send_command({"cmd": "status"})
-            self.apply_subscription()
+    def on_stream_connected(self) -> None:
+        self.apply_subscription()
 
-    def on_error(self, message: str) -> None:
-        self.status_text.setText(f"数据流状态：异常（{message}）")
-
-    def on_message(self, message: dict) -> None:
-        msg_type = message.get("type")
-        if msg_type == "status":
-            self._sync_rings(message.get("rings", []))
-            return
-
-        if msg_type != "imu":
+    def handle_stream_message(self, message: dict) -> None:
+        if message.get("type") != "imu":
             return
 
         acc = message.get("acc")
@@ -185,34 +161,8 @@ class DemoProcessorWindow(QMainWindow):
             )
         )
 
-    def _sync_rings(self, rings: list[dict]) -> None:
-        ring_map = {str(item.get("address", "")): item for item in rings}
-
-        for address in list(self.ring_boxes.keys()):
-            if address not in ring_map:
-                box = self.ring_boxes.pop(address)
-                box.setParent(None)
-
-        for address, ring in ring_map.items():
-            if not address:
-                continue
-            if address in self.ring_boxes:
-                box = self.ring_boxes[address]
-            else:
-                box = QCheckBox()
-                box.setChecked(False)
-                self.ring_boxes[address] = box
-                self.ring_layout.addWidget(box)
-
-            ring_name = ring.get("name", "Unknown")
-            connected = bool(ring.get("connected", False))
-            box.setText(f"{ring_name} | {address} | {'在线' if connected else '离线'}")
-
     def apply_subscription(self) -> None:
-        selected = [addr for addr, box in self.ring_boxes.items() if box.isChecked()]
-        self.client.send_command(
-            {"cmd": "subscribe", "rings": selected, "streams": ["imu"]}
-        )
+        self.send_subscription(["imu"])
 
     def closeEvent(self, event):
         self.client.stop()
