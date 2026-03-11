@@ -37,59 +37,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
+from apps.common.ui_style import MAIN_STYLE_SHEET
 from core.ble_ring_v2 import BLERing
 from core.stream_hub import ImuStreamHub
 
 # ============================================================================
 # 1. 样式表
 # ============================================================================
-STYLE_SHEET = """
-QMainWindow { background-color: #f6f8fb; }
-
-/* 卡片样式 */
-QFrame.device-card {
-    background-color: #ffffff;
-    border: 1px solid #dcdcdc;
-    border-radius: 8px;
-}
-QFrame.device-card-connected {
-    background-color: #e6fffa;
-    border: 1px solid #38b2ac;
-    border-radius: 8px;
-}
-
-/* 按钮样式 */
-QPushButton {
-    border-radius: 10px;
-    padding: 8px 14px;
-    border: none;
-    font-weight: 600;
-    color: white;
-    min-height: 20px;
-    font-size: 13px;
-}
-QPushButton:disabled { background-color: #cbd5e0;}
-QPushButton.btn-primary { background-color: #3182ce; }
-QPushButton.btn-primary:hover { background-color: #2b6cb0; }
-QPushButton.btn-danger { background-color: #e53e3e; }
-QPushButton.btn-danger:hover { background-color: #c53030; }
-QPushButton.btn-success { background-color: #38b2ac; }
-QPushButton.btn-gray { background-color: #a0aec0; color: white; }
-QSpinBox {
-    background-color: #ffffff;
-    border: 1px solid #d6dee9;
-    border-radius: 8px;
-    padding: 6px 10px;
-    min-height: 20px;
-    color: #1e293b;
-    font-size: 13px;
-}
-
-/* 文本 */
-QLabel { font-size: 13px; color: #2d3748; }
-QLabel.title { font-size: 14px; font-weight: bold; }
-QLabel.sub-text { font-size: 11px; color: #718096; }
-"""
+STYLE_SHEET = MAIN_STYLE_SHEET
 
 # ============================================================================
 # 2. 数据模型 (Model)
@@ -367,7 +322,8 @@ class DeviceCard(QFrame):
         self.refresh_view()
 
     def init_ui(self):
-        self.setFixedSize(320, 240)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedSize(360, 240)
         layout = QVBoxLayout(self)
 
         # 第一行：名称
@@ -431,7 +387,7 @@ class DeviceCard(QFrame):
         stat_row.addWidget(self.lbl_battery)
         stat_row.addWidget(self.lbl_imu_fps)
         stat_row.addWidget(self.lbl_audio_fps)
-        stat_row.addStretch()
+        # stat_row.addStretch()
         layout.addLayout(stat_row)
 
     def update_progress(self, current, total):
@@ -512,9 +468,19 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(14)
 
         # 顶部操作栏
-        top_layout = QHBoxLayout()
+        top_panel = QFrame()
+        top_panel.setProperty("class", "panel")
+        top_layout = QVBoxLayout()
+        top_layout.setContentsMargins(16, 14, 16, 14)
+        top_layout.setSpacing(10)
+        row_primary = QHBoxLayout()
+        row_primary.setSpacing(10)
+        row_secondary = QHBoxLayout()
+        row_secondary.setSpacing(10)
         self.btn_scan = QPushButton("开始扫描")
         self.btn_scan.setProperty("class", "btn-primary")
         self.btn_scan.clicked.connect(self.start_scan)  # 连接到 asyncSlot
@@ -535,23 +501,25 @@ class MainWindow(QMainWindow):
         self.chk_audio_stream.stateChanged.connect(self.on_stream_mode_changed)
 
         self.lbl_msg = QLabel("就绪")
-        self.lbl_msg.setStyleSheet("margin-left: 20px; color: #666;")
+        self.lbl_msg.setObjectName("statusTag")
 
-        top_layout.setSpacing(10)
-        top_layout.addWidget(self.btn_scan)
-        top_layout.addWidget(QLabel("Port"))
-        top_layout.addWidget(self.port_input)
-        top_layout.addWidget(QLabel("转发流"))
-        top_layout.addWidget(self.chk_imu_stream)
-        top_layout.addWidget(self.chk_audio_stream)
-        top_layout.addWidget(self.lbl_msg)
-        top_layout.addStretch()
-        main_layout.addLayout(top_layout)
+        row_primary.addWidget(self.btn_scan)
+        row_primary.addWidget(QLabel("Port"))
+        row_primary.addWidget(self.port_input)
+        row_primary.addWidget(self.lbl_msg, 1)
+        row_primary.addStretch()
+        row_secondary.addWidget(QLabel("转发流"))
+        row_secondary.addWidget(self.chk_imu_stream)
+        row_secondary.addWidget(self.chk_audio_stream)
+        row_secondary.addStretch()
+        top_layout.addLayout(row_primary)
+        top_layout.addLayout(row_secondary)
+        top_panel.setLayout(top_layout)
+        main_layout.addWidget(top_panel)
 
         # 滚动区域
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("border: none;")
 
         self.scroll_content = QWidget()
         self.card_layout = QHBoxLayout(self.scroll_content)
@@ -563,47 +531,53 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.scroll_content)
         main_layout.addWidget(scroll)
 
-        apps_row = QHBoxLayout()
+        apps_panel = QFrame()
+        apps_panel.setProperty("class", "panel")
+        apps_row = QGridLayout()
+        apps_row.setContentsMargins(16, 14, 16, 14)
+        apps_row.setHorizontalSpacing(10)
+        apps_row.setVerticalSpacing(10)
         lbl_apps = QLabel("应用")
         lbl_apps.setProperty("class", "title")
-        apps_row.addWidget(lbl_apps)
+        apps_row.addWidget(lbl_apps, 0, 0)
 
         btn_demo = QPushButton("示范应用")
         btn_demo.setProperty("class", "btn-primary")
         btn_demo.clicked.connect(
             lambda: self.launch_app("apps/demo_processor_app.py", "示范应用")
         )
-        apps_row.addWidget(btn_demo)
+        apps_row.addWidget(btn_demo, 0, 1)
 
         btn_visual = QPushButton("IMU 可视化")
         btn_visual.setProperty("class", "btn-primary")
         btn_visual.clicked.connect(
             lambda: self.launch_app("apps/imu_visualizer_app.py", "IMU 可视化")
         )
-        apps_row.addWidget(btn_visual)
+        apps_row.addWidget(btn_visual, 0, 2)
 
         btn_audio = QPushButton("音频监控")
-        btn_audio.setProperty("class", "btn-success")
+        btn_audio.setProperty("class", "btn-primary")
         btn_audio.clicked.connect(
             lambda: self.launch_app("apps/audio_monitor_app.py", "音频监控")
         )
-        apps_row.addWidget(btn_audio)
+        apps_row.addWidget(btn_audio, 0, 3)
 
         btn_recorder = QPushButton("录制中心")
         btn_recorder.setProperty("class", "btn-primary")
         btn_recorder.clicked.connect(
             lambda: self.launch_app("apps/recorder_app.py", "录制中心")
         )
-        apps_row.addWidget(btn_recorder)
+        apps_row.addWidget(btn_recorder, 0, 4)
 
         btn_gesture = QPushButton("手势识别")
         btn_gesture.setProperty("class", "btn-primary")
         btn_gesture.clicked.connect(
             lambda: self.launch_app("apps/gesture_recognition_app.py", "手势识别")
         )
-        apps_row.addWidget(btn_gesture)
-        apps_row.addStretch()
-        main_layout.addLayout(apps_row)
+        apps_row.addWidget(btn_gesture, 0, 5)
+        apps_row.setColumnStretch(6, 1)
+        apps_panel.setLayout(apps_row)
+        main_layout.addWidget(apps_panel)
 
     async def start_background_services(self):
         await self.stream_hub.start()

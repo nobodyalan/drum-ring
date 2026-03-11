@@ -3,17 +3,19 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 import threading
 
 import numpy as np
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -27,6 +29,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from common.stream_window import RingStreamWindowBase
+from common.ui_style import APP_STYLE_SHEET
 from gesture_archive.constants import GESTURE_CODE_TO_NAME
 
 try:
@@ -41,27 +44,7 @@ except Exception as exc:
     MODEL_RUNTIME_ERROR = str(exc)
 
 
-STYLE_SHEET = """
-QMainWindow { background-color: #f6f8fb; }
-QFrame.panel {
-    background-color: #ffffff;
-    border: 1px solid #e3e8ef;
-    border-radius: 12px;
-}
-QPushButton {
-    border-radius: 8px;
-    padding: 8px 14px;
-    border: none;
-    font-weight: 600;
-    color: white;
-    min-height: 34px;
-}
-QPushButton.btn-primary { background-color: #3182ce; }
-QPushButton.btn-primary:hover { background-color: #2b6cb0; }
-QLabel { font-size: 13px; color: #334155; }
-QLabel.title { font-size: 18px; font-weight: 700; color: #0f172a; }
-QLabel.sub-text { font-size: 12px; color: #64748b; }
-"""
+STYLE_SHEET = APP_STYLE_SHEET
 
 
 @dataclass
@@ -75,6 +58,14 @@ class GestureConfig:
     models_allowed_gestures: list[list[int]]
     device: str
     merge_window_seconds: float
+
+
+@dataclass(frozen=True)
+class GestureSnapshot:
+    last_code: int = -1
+    last_name: str = "-"
+    last_ts: float = 0.0
+    detected_count: int = 0
 
 
 def load_gesture_config() -> GestureConfig:
@@ -98,30 +89,9 @@ def load_gesture_config() -> GestureConfig:
     )
 
 
-class Window:
-    def __init__(self, window_length: int):
-        self.window_length = int(window_length)
-        self.data = deque(maxlen=self.window_length)
-
-    def push(self, value):
-        self.data.append(value)
-
-    def clear(self):
-        self.data.clear()
-
-    def capacity(self) -> int:
-        return len(self.data)
-
-    def last(self):
-        return self.data[-1]
-
-    def count(self, predicate) -> int:
-        return sum(1 for x in self.data if predicate(x))
-
-
 @dataclass
 class RingRuntimeState:
-    result_windows: list[Window]
+    result_windows: list[deque[int]]
     ring_last_touch_time: float = 0.0
     last_code: int = -1
     last_name: str = "-"
@@ -133,12 +103,17 @@ class RingRuntimeState:
 
 @dataclass
 class PendingSample:
-    data: np.ndarray
     event_ts: float
 
 
 class InceptionGestureRecognizer:
-    """Strictly follows gesture_archive/ring_server.py GestureHandler flow."""
+    """手势识别主流程。
+
+    逻辑只保留三步：
+    1. 每次新窗口到来时，轮询所有模型各做一次预测。
+    2. 每个模型都维护自己的结果滑窗，只有“同一结果占比足够高”才算稳定命中。
+    3. 命中后再做业务规则过滤：跳过手势、touch/pinch 去抖、短时间重复合并。
+    """
 
     def __init__(self, cfg: GestureConfig):
         self.cfg = cfg
@@ -147,6 +122,7 @@ class InceptionGestureRecognizer:
         self.models = []
         self.model_pointer = 0
         self.ring_states: dict[str, RingRuntimeState] = {}
+        self.allowed_output_indices = [i for i in range(1, 39) if i not in cfg.allowed_gestures]
 
         if not HAS_MODEL_RUNTIME:
             self.error_message = f"torch/tsai unavailable: {MODEL_RUNTIME_ERROR}"
@@ -176,60 +152,58 @@ class InceptionGestureRecognizer:
         except Exception as exc:
             self.error_message = str(exc)
 
-    def _state(self, address: str) -> RingRuntimeState:
+    def state_for(self, address: str) -> RingRuntimeState:
         if address not in self.ring_states:
             self.ring_states[address] = RingRuntimeState(
-                result_windows=[
-                    Window(self.cfg.result_window_length) for _ in range(len(self.models))
-                ],
+                result_windows=[deque(maxlen=self.cfg.result_window_length) for _ in self.models],
             )
         return self.ring_states[address]
+
+    def snapshot_from_state(self, state: RingRuntimeState) -> GestureSnapshot:
+        return GestureSnapshot(
+            last_code=state.last_code,
+            last_name=state.last_name,
+            last_ts=state.last_ts,
+            detected_count=state.detected_count,
+        )
 
     def clear_all_result_windows(self, state: RingRuntimeState):
         for window in state.result_windows:
             window.clear()
 
-    def _detect_gesture(self, data: np.ndarray, state: RingRuntimeState):
-        with torch.no_grad():
-            for _ in range(len(self.models)):
-                model = self.models[self.model_pointer]
-                outputs = model(
-                    torch.from_numpy(data)
-                    .float()
-                    .view(1, 6, self.cfg.window_size)
-                    .to(self.device)
-                )
+    def _predict_one_model(self, model, data: np.ndarray) -> int:
+        outputs = model(
+            torch.from_numpy(data).float().view(1, 6, self.cfg.window_size).to(self.device)
+        )
+        outputs[:, self.allowed_output_indices] = -1e9
+        return int(torch.max(outputs, 1).indices[0].item())
 
-                outputs[
-                    :,
-                    [
-                        i
-                        for i in range(1, outputs.shape[1])
-                        if i not in self.cfg.allowed_gestures
-                    ],
-                ] = -1e9
-                _, predictions = torch.max(outputs, 1)
-                gesture = int(predictions[0].item())
-                state.result_windows[self.model_pointer].push(gesture)
+    def _collect_model_predictions(self, data: np.ndarray, state: RingRuntimeState) -> None:
+        with torch.no_grad():
+            for _ in self.models:
+                model_index = self.model_pointer
+                gesture = self._predict_one_model(self.models[model_index], data)
+                state.result_windows[model_index].append(gesture)
                 self.model_pointer = (self.model_pointer + 1) % len(self.models)
 
-    def _detect_gesture_with_window(self, data: np.ndarray, state: RingRuntimeState) -> int:
-        self._detect_gesture(data, state)
-        for i in range(len(self.models)):
-            if state.result_windows[i].capacity() == 0:
+    def _stable_gesture_from_windows(self, state: RingRuntimeState) -> int:
+        required_votes = self.cfg.result_window_length * self.cfg.positive_ratio
+        for index, window in enumerate(state.result_windows):
+            if not window:
                 return -1
-            gesture = state.result_windows[i].last()
-            if (
-                state.result_windows[i].count(lambda x: x == gesture)
-                >= state.result_windows[i].window_length * self.cfg.positive_ratio
-            ):
-                if (
-                    gesture in self.cfg.allowed_gestures
-                    and gesture in self.cfg.models_allowed_gestures[i]
-                ):
-                    self.clear_all_result_windows(state)
-                    return gesture
+            gesture = window[-1]
+            if window.count(gesture) < required_votes:
+                continue
+            if gesture not in self.cfg.models_allowed_gestures[index]:
+                continue
+            self.clear_all_result_windows(state)
+            return gesture
         return -1
+
+    def _detect_gesture_with_window(self, data: np.ndarray, state: RingRuntimeState) -> int:
+        # 先更新每个模型自己的滑窗，再从滑窗里找“稳定结果”。
+        self._collect_model_predictions(data, state)
+        return self._stable_gesture_from_windows(state)
 
     def _check_if_skipped(self, gesture: int, state: RingRuntimeState) -> bool:
         if gesture in self.cfg.skipped_gestures:
@@ -273,14 +247,15 @@ class InceptionGestureRecognizer:
         if not self.ready:
             return -1
 
-        state = self._state(address)
+        state = self.state_for(address)
         gesture = self._detect_gesture_with_window(window_data, state)
 
-        # Keep the same special handling as ring_server.py
+        # 兼容旧逻辑：gesture 16 幅值太小就视为无效。
         if gesture == 16:
             if float(np.max(window_data) - np.min(window_data)) < 25.0:
                 gesture = -2
 
+        # 命中了也不一定上报，还要过一层业务过滤。
         if gesture >= 0 and self._check_if_skipped(gesture, state):
             self.clear_all_result_windows(state)
             return -2
@@ -301,9 +276,6 @@ class InceptionGestureRecognizer:
             state.last_emitted_ts = event_ts
 
         return gesture
-
-    def get_state(self, address: str) -> RingRuntimeState:
-        return self._state(address)
 
     def reset_counts(self):
         for state in self.ring_states.values():
@@ -342,6 +314,15 @@ class GestureInferenceWorker(QThread):
         self._clear_all_requested = False
         self._clear_addresses: set[str] = set()
 
+    def _state_payload(self, state: RingRuntimeState) -> dict:
+        snapshot = self.recognizer.snapshot_from_state(state)
+        return {
+            "last_code": snapshot.last_code,
+            "last_name": snapshot.last_name,
+            "last_ts": snapshot.last_ts,
+            "detected_count": snapshot.detected_count,
+        }
+
     def stop(self) -> None:
         with self._condition:
             self._running = False
@@ -359,7 +340,7 @@ class GestureInferenceWorker(QThread):
             self._condition.notify_all()
 
     def enqueue_sample(self, address: str, data: np.ndarray, event_ts: float) -> None:
-        sample = PendingSample(data=data, event_ts=event_ts)
+        sample = PendingSample(event_ts=event_ts)
         with self._condition:
             self._received_since_stats += 1
             window = self._sample_windows.get(address)
@@ -428,18 +409,9 @@ class GestureInferenceWorker(QThread):
                 continue
             address, window_data, event_ts = sample
             code = self.recognizer.detect_window(address, window_data, event_ts)
-            state = self.recognizer.get_state(address)
+            state = self.recognizer.state_for(address)
             self._processed_since_stats += 1
-            self.sig_result.emit(
-                address,
-                {
-                    "last_code": state.last_code,
-                    "last_name": state.last_name,
-                    "last_ts": state.last_ts,
-                    "detected_count": state.detected_count,
-                },
-                code,
-            )
+            self.sig_result.emit(address, self._state_payload(state), code)
             self._emit_stats_if_needed()
 
         self._emit_stats(force=True)
@@ -447,16 +419,7 @@ class GestureInferenceWorker(QThread):
     def _apply_reset(self) -> None:
         self.recognizer.reset_counts()
         for address, state in self.recognizer.ring_states.items():
-            self.sig_result.emit(
-                address,
-                {
-                    "last_code": state.last_code,
-                    "last_name": state.last_name,
-                    "last_ts": state.last_ts,
-                    "detected_count": state.detected_count,
-                },
-                -1,
-            )
+            self.sig_result.emit(address, self._state_payload(state), -1)
         self.sig_stats.emit(
             {
                 "recv_fps": 0.0,
@@ -501,6 +464,7 @@ class GestureInferenceWorker(QThread):
         if not self._ring_order:
             return None
 
+        # 每个戒指只保留最新待处理样本，优先降低延迟而不是补算旧帧。
         rounds = len(self._ring_order)
         for _ in range(rounds):
             address = self._ring_order[0]
@@ -583,13 +547,13 @@ class RingGestureCard(QFrame):
         layout.addWidget(self.lbl_count)
         layout.addWidget(self.lbl_time)
 
-    def update_state(self, state: RingRuntimeState):
-        code_text = str(state.last_code) if state.last_code >= 0 else "-"
-        self.lbl_latest.setText(f"最新手势: {state.last_name} ({code_text})")
-        self.lbl_count.setText(f"累计识别: {state.detected_count}")
-        if state.last_ts > 0:
+    def update_state(self, snapshot: GestureSnapshot):
+        code_text = str(snapshot.last_code) if snapshot.last_code >= 0 else "-"
+        self.lbl_latest.setText(f"最新手势: {snapshot.last_name} ({code_text})")
+        self.lbl_count.setText(f"累计识别: {snapshot.detected_count}")
+        if snapshot.last_ts > 0:
             self.lbl_time.setText(
-                f"最近触发: {time.strftime('%H:%M:%S', time.localtime(state.last_ts))}"
+                f"最近触发: {time.strftime('%H:%M:%S', time.localtime(snapshot.last_ts))}"
             )
         else:
             self.lbl_time.setText("最近触发: -")
@@ -608,8 +572,10 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         self._stream_connected = False
         self._worker_ready = False
         self._worker_error = ""
+        self._subscription_applied = False
 
         self.status_label = QLabel("数据流状态：未连接")
+        self.status_label.setObjectName("statusTag")
         self.total_count_label = QLabel("总识别次数: 0")
         self.rate_label = QLabel("接收: --Hz | 识别: --Hz | 覆盖: 0")
         self.rate_label.setProperty("class", "sub-text")
@@ -638,6 +604,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         title.setProperty("class", "title")
         desc = QLabel("多模型投票 + 滑窗判定。")
         desc.setProperty("class", "sub-text")
+        desc.setWordWrap(True)
 
         panel_layout.addWidget(title)
         panel_layout.addWidget(desc)
@@ -651,28 +618,76 @@ class GestureRecognitionWindow(RingStreamWindowBase):
             max_height=170,
         )
 
-        actions = QHBoxLayout()
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
         self.apply_btn = QPushButton("应用订阅")
         self.apply_btn.setProperty("class", "btn-primary")
         self.reset_btn = QPushButton("清空计数")
-        self.reset_btn.setProperty("class", "btn-primary")
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("尽可能满帧率", GestureInferenceWorker.MODE_MAX)
-        self.mode_combo.addItem("指定帧率", GestureInferenceWorker.MODE_TARGET)
+        self.reset_btn.setProperty("class", "btn-gray")
+        action_row.addWidget(self.apply_btn)
+        action_row.addWidget(self.reset_btn)
+        action_row.addStretch()
+        panel_layout.addLayout(action_row)
+
+        settings_panel = QFrame()
+        settings_panel.setProperty("class", "settings-panel")
+        settings_layout = QGridLayout(settings_panel)
+        settings_layout.setContentsMargins(14, 12, 14, 12)
+        settings_layout.setHorizontalSpacing(16)
+        settings_layout.setVerticalSpacing(12)
+
+        mode_title = QLabel("处理模式")
+        mode_title.setProperty("class", "settings-title")
+        mode_desc = QLabel("控制识别线程是持续吃满最新样本，还是按指定速率运行。")
+        mode_desc.setProperty("class", "settings-desc")
+        mode_desc.setWordWrap(True)
+        mode_switch = QHBoxLayout()
+        mode_switch.setSpacing(8)
+        self.mode_btn_max = QPushButton("尽可能满帧率")
+        self.mode_btn_max.setProperty("class", "segment")
+        self.mode_btn_max.setCheckable(True)
+        self.mode_btn_max.setChecked(True)
+        self.mode_btn_target = QPushButton("指定帧率")
+        self.mode_btn_target.setProperty("class", "segment")
+        self.mode_btn_target.setCheckable(True)
+        mode_switch.addWidget(self.mode_btn_max)
+        mode_switch.addWidget(self.mode_btn_target)
+
+        fps_title = QLabel("目标帧率")
+        fps_title.setProperty("class", "settings-title")
+        fps_desc = QLabel("仅在“指定帧率”模式下生效，用于限制推理刷新速度。")
+        fps_desc.setProperty("class", "settings-desc")
+        fps_desc.setWordWrap(True)
         self.fps_spin = QDoubleSpinBox()
         self.fps_spin.setRange(0.1, 240.0)
         self.fps_spin.setValue(30.0)
         self.fps_spin.setDecimals(1)
         self.fps_spin.setSuffix(" Hz")
         self.fps_spin.setEnabled(False)
+        self.fps_spin.setMinimumWidth(140)
+        self.fps_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.fps_spin.setObjectName("settingsField")
+
+        mode_text = QVBoxLayout()
+        mode_text.setSpacing(4)
+        mode_text.addWidget(mode_title)
+        mode_text.addWidget(mode_desc)
+
+        fps_text = QVBoxLayout()
+        fps_text.setSpacing(4)
+        fps_text.addWidget(fps_title)
+        fps_text.addWidget(fps_desc)
+
+        settings_layout.addLayout(mode_text, 0, 0)
+        settings_layout.addLayout(mode_switch, 0, 1)
+        settings_layout.addLayout(fps_text, 1, 0)
+        settings_layout.addWidget(self.fps_spin, 1, 1)
+        settings_layout.setColumnStretch(0, 1)
+
         self.mode_hint = QLabel("识别始终优先使用最新数据；旧样本会被覆盖以降低延迟。")
         self.mode_hint.setProperty("class", "sub-text")
-        actions.addWidget(self.apply_btn)
-        actions.addWidget(self.reset_btn)
-        actions.addWidget(self.mode_combo)
-        actions.addWidget(self.fps_spin)
-        actions.addStretch()
-        panel_layout.addLayout(actions)
+        self.mode_hint.setWordWrap(True)
+        panel_layout.addWidget(settings_panel)
         panel_layout.addWidget(self.mode_hint)
 
         self.cards_scroll = QScrollArea()
@@ -685,18 +700,38 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         self.cards_scroll.setWidget(self.cards_content)
 
         root.addWidget(panel)
+        self.cards_hint = QLabel("订阅后才会显示各戒指的识别卡片。")
+        self.cards_hint.setProperty("class", "sub-text")
+        self.cards_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cards_hint.setWordWrap(True)
+        root.addWidget(self.cards_hint)
         root.addWidget(self.cards_scroll)
+        self.cards_scroll.setVisible(False)
+
+        self.empty_hint = QLabel("当前订阅下暂无可显示的戒指。")
+        self.empty_hint.setProperty("class", "sub-text")
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cards_layout.addWidget(self.empty_hint)
 
     def _bind_signals(self):
         self.apply_btn.clicked.connect(self.apply_subscription)
         self.reset_btn.clicked.connect(self.reset_counts)
-        self.mode_combo.currentIndexChanged.connect(self.on_processing_mode_changed)
+        self.mode_btn_max.clicked.connect(
+            partial(self._on_mode_button_clicked, GestureInferenceWorker.MODE_MAX)
+        )
+        self.mode_btn_target.clicked.connect(
+            partial(self._on_mode_button_clicked, GestureInferenceWorker.MODE_TARGET)
+        )
         self.fps_spin.valueChanged.connect(self.on_processing_mode_changed)
 
         self.bind_stream_client_signals()
         self.worker.sig_runtime.connect(self.on_worker_runtime)
         self.worker.sig_result.connect(self.on_worker_result)
         self.worker.sig_stats.connect(self.on_worker_stats)
+
+    def _on_mode_button_clicked(self, mode: str, checked: bool) -> None:
+        if checked:
+            self.set_processing_mode_ui(mode)
 
     def on_connected_changed(self, connected: bool):
         self._stream_connected = connected
@@ -705,7 +740,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         self.refresh_status()
         if connected:
             self.client.send_command({"cmd": "status"})
-            self.apply_subscription()
+            self.refresh_cards()
 
     def on_error(self, message: str):
         if self._worker_error:
@@ -722,9 +757,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         if address not in self.cards:
             self.add_card(address)
         self.cards[address].update_state(
-            RingRuntimeState(
-                result_windows=[],
-                ring_last_touch_time=0.0,
+            GestureSnapshot(
                 last_code=int(state_payload.get("last_code", -1)),
                 last_name=str(state_payload.get("last_name", "-")),
                 last_ts=float(state_payload.get("last_ts", 0.0) or 0.0),
@@ -753,11 +786,22 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         self.status_label.setText(f"数据流状态：{'已连接' if self._stream_connected else '未连接'}")
 
     def on_processing_mode_changed(self, *_args):
-        mode = str(self.mode_combo.currentData())
+        mode = self.current_processing_mode()
         is_target = mode == GestureInferenceWorker.MODE_TARGET
         self.fps_spin.setEnabled(is_target and self._worker_ready)
         if self._worker_ready:
             self.worker.set_processing_mode(mode, self.fps_spin.value())
+
+    def current_processing_mode(self) -> str:
+        if self.mode_btn_target.isChecked():
+            return GestureInferenceWorker.MODE_TARGET
+        return GestureInferenceWorker.MODE_MAX
+
+    def set_processing_mode_ui(self, mode: str) -> None:
+        is_target = mode == GestureInferenceWorker.MODE_TARGET
+        self.mode_btn_max.setChecked(not is_target)
+        self.mode_btn_target.setChecked(is_target)
+        self.on_processing_mode_changed()
 
     def handle_stream_message(self, message: dict):
         if message.get("type") != "imu":
@@ -821,6 +865,13 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         self.cards_layout.addWidget(card)
 
     def refresh_cards(self):
+        if not self._subscription_applied:
+            self.cards_hint.setVisible(True)
+            self.cards_scroll.setVisible(False)
+            return
+
+        self.cards_hint.setVisible(False)
+        self.cards_scroll.setVisible(True)
         target = self.effective_addresses()
         for address in list(self.cards.keys()):
             if address not in target:
@@ -831,7 +882,10 @@ class GestureRecognitionWindow(RingStreamWindowBase):
             if address and address not in self.cards:
                 self.add_card(address)
 
+        self.empty_hint.setVisible(len(target) == 0)
+
     def apply_subscription(self):
+        self._subscription_applied = True
         self.send_subscription(["imu"])
         self.refresh_cards()
 
@@ -840,12 +894,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         self.total_count_label.setText("总识别次数: 0")
         self.worker.reset_counts()
         for card in self.cards.values():
-            card.update_state(
-                RingRuntimeState(
-                    result_windows=[],
-                    ring_last_touch_time=0.0,
-                )
-            )
+            card.update_state(GestureSnapshot())
 
     def closeEvent(self, event):
         self.client.stop()

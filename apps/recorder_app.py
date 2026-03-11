@@ -21,30 +21,9 @@ from PyQt6.QtWidgets import (
 )
 
 from common.stream_window import RingStreamWindowBase
+from common.ui_style import APP_STYLE_SHEET
 
-STYLE_SHEET = """
-QMainWindow { background-color: #f6f8fb; }
-QFrame.panel {
-    background-color: #ffffff;
-    border: 1px solid #e3e8ef;
-    border-radius: 12px;
-}
-QPushButton {
-    border-radius: 8px;
-    padding: 8px 14px;
-    border: none;
-    font-weight: 600;
-    color: white;
-    min-height: 34px;
-}
-QPushButton.btn-primary { background-color: #3182ce; }
-QPushButton.btn-primary:hover { background-color: #2b6cb0; }
-QPushButton.btn-success { background-color: #38a169; }
-QPushButton.btn-danger { background-color: #e53e3e; }
-QLabel { font-size: 13px; color: #334155; }
-QLabel.title { font-size: 18px; font-weight: 700; color: #0f172a; }
-QLabel.sub-text { font-size: 12px; color: #64748b; }
-"""
+STYLE_SHEET = APP_STYLE_SHEET
 
 class AdpcmDecoder:
     index_table = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
@@ -110,6 +89,7 @@ class RecorderWindow(RingStreamWindowBase):
         self.audio_decoders: dict[str, AdpcmDecoder] = {}
 
         self.status_label = QLabel("数据流状态：未连接")
+        self.status_label.setObjectName("statusTag")
         self.metric_label = QLabel("就绪")
 
         self._build_ui()

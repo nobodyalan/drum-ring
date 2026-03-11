@@ -23,78 +23,9 @@ from PyQt6.QtWidgets import (
 )
 
 from common.stream_window import RingStreamWindowBase
+from common.ui_style import APP_STYLE_SHEET
 
-STYLE_SHEET = """
-QMainWindow { background-color: #f6f8fb; }
-QFrame.panel {
-    background-color: #ffffff;
-    border: 1px solid #e3e8ef;
-    border-radius: 14px;
-}
-QPushButton {
-    border-radius: 10px;
-    padding: 8px 16px;
-    border: none;
-    font-weight: 600;
-    color: white;
-    min-height: 20px;
-}
-QPushButton.btn-primary { background-color: #3182ce; }
-QPushButton.btn-primary:hover { background-color: #2b6cb0; }
-QCheckBox { font-size: 13px; color: #334155; spacing: 8px; }
-QCheckBox::indicator {
-    width: 18px;
-    height: 18px;
-    border-radius: 5px;
-    border: 1px solid #c7d2e3;
-    background: #ffffff;
-}
-QCheckBox::indicator:checked {
-    background: #3182ce;
-    border: 1px solid #3182ce;
-}
-QDoubleSpinBox {
-    background-color: #ffffff;
-    border: 1px solid #d6dee9;
-    border-radius: 8px;
-    padding: 6px 10px;
-    min-height: 20px;
-    color: #1e293b;
-}
-QDoubleSpinBox:disabled {
-    background-color: #f1f5f9;
-    color: #94a3b8;
-}
-QSlider::groove:horizontal {
-    border: 0px;
-    height: 8px;
-    background: #e2e8f0;
-    border-radius: 4px;
-}
-QSlider::handle:horizontal {
-    background: #3182ce;
-    width: 18px;
-    margin: -6px 0;
-    border-radius: 9px;
-}
-QLabel { font-size: 13px; color: #334155; }
-QLabel.title { font-size: 20px; font-weight: 700; color: #0f172a; }
-QLabel.sub-text { font-size: 12px; color: #64748b; }
-QLabel#statusTag {
-    background: #eef5ff;
-    border: 1px solid #cddff7;
-    border-radius: 8px;
-    padding: 6px 10px;
-    color: #1d4f91;
-}
-QLabel#valuePill {
-    background: #edf2f7;
-    border-radius: 10px;
-    padding: 4px 10px;
-    font-weight: 600;
-    color: #1e3a5f;
-}
-"""
+STYLE_SHEET = APP_STYLE_SHEET
 
 ACC_AXIS_COLORS = [QColor("#E53E3E"), QColor("#F59E0B"), QColor("#10B981")]
 GYR_AXIS_COLORS = [QColor("#2563EB"), QColor("#7C3AED"), QColor("#EC4899")]
@@ -379,6 +310,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
 
         self.buffers: dict[str, RingBuffer] = {}
         self.cards: dict[str, RingPlotCard] = {}
+        self._subscription_applied = False
 
         self.status_label = QLabel("数据流状态：未连接")
         self.status_label.setObjectName("statusTag")
@@ -412,6 +344,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         title.setProperty("class", "title")
         subtitle = QLabel("多戒指模式将生成多个小窗口卡片，每个卡片单独渲染一个戒指。")
         subtitle.setProperty("class", "sub-text")
+        subtitle.setWordWrap(True)
 
         top_layout.addWidget(title)
         top_layout.addWidget(subtitle)
@@ -484,7 +417,13 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         self.cards_layout.addWidget(self.empty_hint)
 
         root.addWidget(top_panel)
+        self.cards_hint = QLabel("请先勾选戒指并点击“应用订阅”后显示可视化。")
+        self.cards_hint.setProperty("class", "sub-text")
+        self.cards_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cards_hint.setWordWrap(True)
+        root.addWidget(self.cards_hint)
         root.addWidget(self.cards_scroll)
+        self.cards_scroll.setVisible(False)
 
     def _bind_signals(self) -> None:
         self.apply_btn.clicked.connect(self.apply_subscription)
@@ -496,7 +435,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         self.bind_stream_client_signals()
 
     def on_stream_connected(self) -> None:
-        self.apply_subscription()
+        self._refresh_cards()
 
     def on_window_changed(self, value: int) -> None:
         self.window_label.setText(f"{value}s")
@@ -556,6 +495,13 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         return self._selected_addresses()
 
     def _refresh_cards(self) -> None:
+        if not self._subscription_applied:
+            self.cards_hint.setVisible(True)
+            self.cards_scroll.setVisible(False)
+            return
+
+        self.cards_hint.setVisible(False)
+        self.cards_scroll.setVisible(True)
         target = self._effective_addresses()
 
         for address in list(self.cards.keys()):
@@ -586,6 +532,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         self.empty_hint.setVisible(len(target) == 0)
 
     def apply_subscription(self) -> None:
+        self._subscription_applied = True
         self.send_subscription(["imu"], empty_behavior="none")
         self._refresh_cards()
 

@@ -15,23 +15,9 @@ from PyQt6.QtWidgets import (
 )
 
 from common.stream_window import RingStreamWindowBase
+from common.ui_style import APP_STYLE_SHEET
 
-STYLE_SHEET = """
-QMainWindow { background-color: #f2f3f5; }
-QFrame.panel {
-    background-color: #ffffff;
-    border: 1px solid #dcdcdc;
-    border-radius: 8px;
-}
-QPushButton {
-    border-radius: 4px; padding: 6px 12px; border: none; font-weight: bold; color: white;
-}
-QPushButton.btn-primary { background-color: #3182ce; }
-QPushButton.btn-primary:hover { background-color: #2b6cb0; }
-QLabel { font-size: 13px; color: #2d3748; }
-QLabel.title { font-size: 14px; font-weight: bold; }
-QLabel.sub-text { font-size: 11px; color: #718096; }
-"""
+STYLE_SHEET = APP_STYLE_SHEET
 
 
 @dataclass
@@ -91,6 +77,7 @@ class DemoProcessorWindow(RingStreamWindowBase):
         self.processor: BaseImuProcessor = DemoImuProcessor()
 
         self.status_text = QLabel("数据流状态：未连接")
+        self.status_text.setObjectName("statusTag")
         self.metrics_text = QLabel("包数: 0\nEMA(acc): --\nEMA(gyr): --")
 
         self._build_ui()
