@@ -33,13 +33,11 @@ from common.ui_style import APP_STYLE_SHEET
 from common.constants import GESTURE_CODE_TO_NAME
 
 try:
-    import torch
-    from tsai.models.InceptionTime import InceptionTime
+    from openvino import Core
 
     HAS_MODEL_RUNTIME = True
 except Exception as exc:
-    torch = None
-    InceptionTime = None
+    Core = None
     HAS_MODEL_RUNTIME = False
     MODEL_RUNTIME_ERROR = str(exc)
 
@@ -77,14 +75,14 @@ def load_gesture_config() -> GestureConfig:
         result_window_length=8,
         window_size=200,
         models=[
-            "checkpoint/it-pinch.pth",
-            "checkpoint/it-snap.pth",
+            "checkpoint/it-pinch/it-pinch.xml",
+            "checkpoint/it-snap/it-snap.xml",
         ],
         models_allowed_gestures=[
             [8, 13, 14],
             [16, 30, 31, 34, 35, 36],
         ],
-        device="cpu",
+        device="CPU",
         merge_window_seconds=1.0,
     )
 
@@ -125,25 +123,25 @@ class InceptionGestureRecognizer:
         self.allowed_output_indices = [i for i in range(1, 39) if i not in cfg.allowed_gestures]
 
         if not HAS_MODEL_RUNTIME:
-            self.error_message = f"torch/tsai unavailable: {MODEL_RUNTIME_ERROR}"
+            self.error_message = f"openvino unavailable: {MODEL_RUNTIME_ERROR}"
             return
 
         try:
-            device_str = cfg.device
-            if device_str.startswith("cuda") and not torch.cuda.is_available():
-                device_str = "cpu"
-            self.device = torch.device(device_str)
+            self.device = cfg.device.upper()
+            core = Core()
 
             for model_path_str in cfg.models:
                 model_path = APP_ROOT / model_path_str
                 if not model_path.exists():
                     raise FileNotFoundError(f"model not found: {model_path}")
-
-                model = InceptionTime(6, 39, nf=32).to(self.device)
-                ckpt = torch.load(model_path, map_location=self.device, weights_only=False)
-                model.load_state_dict(ckpt["model"])
-                model.eval()
-                self.models.append(model)
+                compiled = core.compile_model(model=str(model_path), device_name=self.device)
+                self.models.append(
+                    {
+                        "compiled": compiled,
+                        "input": compiled.input(0),
+                        "output": compiled.output(0),
+                    }
+                )
 
             if len(self.models) != len(cfg.models_allowed_gestures):
                 raise ValueError("models and models_allowed_gestures length mismatch")
@@ -171,20 +169,19 @@ class InceptionGestureRecognizer:
         for window in state.result_windows:
             window.clear()
 
-    def _predict_one_model(self, model, data: np.ndarray) -> int:
-        outputs = model(
-            torch.from_numpy(data).float().view(1, 6, self.cfg.window_size).to(self.device)
-        )
+    def _predict_one_model(self, model: dict, data: np.ndarray) -> int:
+        input_data = data.reshape(1, 6, self.cfg.window_size).astype(np.float32, copy=False)
+        outputs = model["compiled"]({model["input"]: input_data})[model["output"]]
+        outputs = np.asarray(outputs, dtype=np.float32)
         outputs[:, self.allowed_output_indices] = -1e9
-        return int(torch.max(outputs, 1).indices[0].item())
+        return int(np.argmax(outputs, axis=1)[0])
 
     def _collect_model_predictions(self, data: np.ndarray, state: RingRuntimeState) -> None:
-        with torch.no_grad():
-            for _ in self.models:
-                model_index = self.model_pointer
-                gesture = self._predict_one_model(self.models[model_index], data)
-                state.result_windows[model_index].append(gesture)
-                self.model_pointer = (self.model_pointer + 1) % len(self.models)
+        for _ in self.models:
+            model_index = self.model_pointer
+            gesture = self._predict_one_model(self.models[model_index], data)
+            state.result_windows[model_index].append(gesture)
+            self.model_pointer = (self.model_pointer + 1) % len(self.models)
 
     def _stable_gesture_from_windows(self, state: RingRuntimeState) -> int:
         required_votes = self.cfg.result_window_length * self.cfg.positive_ratio
@@ -600,7 +597,7 @@ class GestureRecognitionWindow(RingStreamWindowBase):
         panel_layout.setContentsMargins(14, 14, 14, 14)
         panel_layout.setSpacing(10)
 
-        title = QLabel("手势识别可视化（InceptionTime）")
+        title = QLabel("手势识别可视化（OpenVINO）")
         title.setProperty("class", "title")
         desc = QLabel("多模型投票 + 滑窗判定。")
         desc.setProperty("class", "sub-text")
