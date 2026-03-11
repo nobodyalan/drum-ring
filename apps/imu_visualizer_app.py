@@ -48,6 +48,12 @@ class RingBuffer:
         self.write_idx = (idx + 1) % self.capacity
         self.count = min(self.count + 1, self.capacity)
 
+    def latest_timestamp(self) -> float:
+        if self.count == 0:
+            return 0.0
+        latest_idx = (self.write_idx - 1) % self.capacity
+        return float(self.timestamps[latest_idx])
+
     def recent(self, since_ts: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.count == 0:
             return (
@@ -104,8 +110,9 @@ class RingMiniPlotWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.fillRect(self.rect(), QColor("#ffffff"))
 
-        now = time.time()
-        since_ts = now - self.window_seconds
+        latest_ts = self.buffer_ref.latest_timestamp()
+        window_end = latest_ts if latest_ts > 0 else time.time()
+        since_ts = window_end - self.window_seconds
         ts, acc, gyr = self.buffer_ref.recent(since_ts)
 
         margin = 10
@@ -149,7 +156,15 @@ class RingMiniPlotWidget(QWidget):
         painter.setPen(QColor("#e2e8f0"))
         painter.drawRect(x, y, w, h)
 
+        finite_mask = np.isfinite(ts)
+        if values.ndim == 2 and values.shape[1] == 3:
+            finite_mask &= np.all(np.isfinite(values), axis=1)
+        ts = ts[finite_mask]
+        values = values[finite_mask]
+
         if ts.size < 2 or values.shape[0] < 2:
+            painter.setPen(QColor("#94a3b8"))
+            painter.drawText(x + 12, y + h // 2 + 4, "等待 IMU 数据")
             return
 
         y_min, y_max = self._range(values, fixed_scale)
@@ -462,19 +477,30 @@ class ImuVisualizerWindow(RingStreamWindowBase):
             return
         acc_raw = message.get("acc")
         gyr_raw = message.get("gyr")
-        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
-        timestamp = host_ts if host_ts > 0 else time.time()
         if not isinstance(acc_raw, list) or not isinstance(gyr_raw, list):
             return
         if len(acc_raw) != 3 or len(gyr_raw) != 3:
             return
 
+        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
+        timestamp = self._resolve_event_timestamp(host_ts)
         acc = np.array(acc_raw, dtype=np.float32)
         gyr = np.array(gyr_raw, dtype=np.float32)
 
         if address not in self.buffers:
             self.buffers[address] = RingBuffer()
         self.buffers[address].append(timestamp, acc, gyr)
+
+    def _resolve_event_timestamp(self, host_ts: float) -> float:
+        now = time.time()
+        cpu_time = time.perf_counter()
+        host_ts = host_ts - cpu_time + now
+        if not np.isfinite(host_ts) or host_ts <= 0:
+            return now
+        # Plot windows are based on wall-clock seconds; discard obviously invalid epochs.
+        if host_ts < 946684800 or abs(host_ts - now) > 86400:
+            return now
+        return host_ts
 
     def on_rings_updated(
         self,

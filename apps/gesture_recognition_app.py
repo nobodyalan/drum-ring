@@ -30,7 +30,7 @@ if str(APP_ROOT) not in sys.path:
 
 from common.stream_window import RingStreamWindowBase
 from common.ui_style import APP_STYLE_SHEET
-from gesture_archive.constants import GESTURE_CODE_TO_NAME
+from common.constants import GESTURE_CODE_TO_NAME
 
 try:
     import torch
