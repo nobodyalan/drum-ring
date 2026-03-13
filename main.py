@@ -730,6 +730,9 @@ class MainWindow(QMainWindow):
                     imu_callback=lambda _, imu, address=addr: self.handle_imu_data(
                         address, imu
                     ),
+                    touch_callback=lambda _, action_code, address=addr: self.handle_touch_data(
+                        address, action_code
+                    ),
                     audio_callback=lambda _, audio_type, audio, local_ts, host_ts, address=addr: self.handle_audio_data(
                         address, audio_type, audio, local_ts, host_ts
                     ),
@@ -812,6 +815,17 @@ class MainWindow(QMainWindow):
             host_timestamp=host_timestamp,
             audio_type=audio_type,
             audio_bytes=bytes(audio),
+        )
+
+    def handle_touch_data(self, address: str, action_code: int):
+        device = self.devices.get(address)
+        if device is None:
+            return
+        self.stream_hub.publish_touch(
+            address=address,
+            name=device.name,
+            host_timestamp=time.time(),
+            action_code=int(action_code),
         )
 
     def add_card_ui(self, device: RingDevice):

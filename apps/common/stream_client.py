@@ -19,6 +19,7 @@ class JsonLineStreamClient(QThread):
         self.reconnect_interval = reconnect_interval
         self._running = True
         self._send_queue: queue.Queue[str] = queue.Queue(maxsize=1024)
+        self._message_hooks: list = []
 
     def send_command(self, command: dict[str, Any]) -> None:
         try:
@@ -29,6 +30,9 @@ class JsonLineStreamClient(QThread):
 
     def stop(self) -> None:
         self._running = False
+
+    def add_message_hook(self, hook) -> None:
+        self._message_hooks.append(hook)
 
     def run(self) -> None:
         while self._running:
@@ -72,6 +76,11 @@ class JsonLineStreamClient(QThread):
                 except json.JSONDecodeError:
                     self.sig_error.emit("收到无法解析的 JSON 消息")
                     continue
+                for hook in tuple(self._message_hooks):
+                    try:
+                        hook(payload)
+                    except Exception:
+                        pass
                 self.sig_message.emit(payload)
 
     def _flush_send_queue(self, sock: socket.socket) -> None:

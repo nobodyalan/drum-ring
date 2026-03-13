@@ -5,11 +5,17 @@ description = "AI-Ring project."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ahrs>=0.4.0",
     "bleak>=1.1.1",
     "ipython>=9.10.0",
     "numpy>=2.0.2",
+    "oneeurofilter>=0.2.1",
     "openvino>=2025.0.0",
+    "pynput>=1.8.1",
     "pyqt6>=6.10.2",
+    "pyquaternion>=0.9.9",
     "qasync>=0.28.0",
+    "screeninfo>=0.8.1",
     "tqdm>=4.67.3",
+    "vqf>=2.1.1",
 ]

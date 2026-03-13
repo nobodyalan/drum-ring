@@ -123,6 +123,29 @@ class ImuStreamHub:
                 continue
             self._enqueue_for_client(client, message)
 
+    def publish_touch(
+        self,
+        *,
+        address: str,
+        name: str,
+        host_timestamp: float,
+        action_code: int,
+    ) -> None:
+        payload = {
+            "type": "touch",
+            "address": address,
+            "name": name,
+            "host_timestamp": host_timestamp,
+            "action_code": action_code,
+        }
+        message = json.dumps(payload, ensure_ascii=False)
+        for client in tuple(self._clients):
+            if "touch" not in client.stream_types:
+                continue
+            if client.subscriptions is not None and address not in client.subscriptions:
+                continue
+            self._enqueue_for_client(client, message)
+
     async def _on_client(
         self,
         reader: asyncio.StreamReader,
