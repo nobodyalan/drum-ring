@@ -575,7 +575,14 @@ class MainWindow(QMainWindow):
             lambda: self.launch_app("apps/gesture_recognition_app.py", "手势识别")
         )
         apps_row.addWidget(btn_gesture, 0, 5)
-        apps_row.setColumnStretch(6, 1)
+
+        btn_touchpad = QPushButton("触控板")
+        btn_touchpad.setProperty("class", "btn-primary")
+        btn_touchpad.clicked.connect(
+            lambda: self.launch_app("apps/touchpad_app.py", "触控板")
+        )
+        apps_row.addWidget(btn_touchpad, 0, 6)
+        apps_row.setColumnStretch(7, 1)
         apps_panel.setLayout(apps_row)
         main_layout.addWidget(apps_panel)
 

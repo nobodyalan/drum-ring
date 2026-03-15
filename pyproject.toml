@@ -16,6 +16,7 @@ dependencies = [
     "pyquaternion>=0.9.9",
     "qasync>=0.28.0",
     "screeninfo>=0.8.1",
+    "tsai>=0.4.1",
     "tqdm>=4.67.3",
     "vqf>=2.1.1",
 ]

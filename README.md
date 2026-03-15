@@ -20,6 +20,7 @@
   - `apps/audio_monitor_app.py`（音频解码、播放、保存）
   - `apps/recorder_app.py`（多戒指 IMU/音频录制）
   - `apps/gesture_recognition_app.py`（手势识别与分戒指可视化计数）
+  - `apps/touchpad_app.py`（移植自 `ring_app_touchpad` 的戒指触控板）
 
 ## 环境要求
 
@@ -218,6 +219,7 @@ uv run python apps/imu_visualizer_app.py --host 127.0.0.1 --port 17888
 uv run python apps/audio_monitor_app.py --host 127.0.0.1 --port 17888
 uv run python apps/recorder_app.py --host 127.0.0.1 --port 17888
 uv run python apps/gesture_recognition_app.py --host 127.0.0.1 --port 17888
+uv run python apps/touchpad_app.py --host 127.0.0.1 --port 17888
 
 # 检查语法
 python -m compileall main.py core apps
