@@ -1,4 +1,6 @@
 import argparse
+import base64
+import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +31,52 @@ STYLE_SHEET = APP_STYLE_SHEET
 
 ACC_AXIS_COLORS = [QColor("#E53E3E"), QColor("#F59E0B"), QColor("#10B981")]
 GYR_AXIS_COLORS = [QColor("#2563EB"), QColor("#7C3AED"), QColor("#EC4899")]
+
+
+class AdpcmDecoder:
+    index_table = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
+    step_size_table = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+        19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+        50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+        130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+        337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+        2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+        5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+        15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    ]
+
+    def __init__(self):
+        self.predsample = 0
+        self.pcm_index = 0
+
+    def decode(self, code: int) -> int:
+        step = self.step_size_table[self.pcm_index]
+        diff = step >> 3
+        if code & 4:
+            diff += step
+        if code & 2:
+            diff += step >> 1
+        if code & 1:
+            diff += step >> 2
+        if code & 8:
+            diff = -diff
+
+        self.predsample += diff
+        self.predsample = max(-32768, min(32767, self.predsample))
+        self.pcm_index += self.index_table[code]
+        self.pcm_index = max(0, min(88, self.pcm_index))
+        return self.predsample
+
+    def decode_packet(self, data: bytes) -> bytes:
+        pcm = bytearray()
+        for value in data:
+            pcm.extend(struct.pack("<h", self.decode(value & 0xF)))
+            pcm.extend(struct.pack("<h", self.decode((value >> 4) & 0xF)))
+        return bytes(pcm)
+
+
 @dataclass
 class RingBuffer:
     capacity: int = 12000
@@ -84,17 +132,79 @@ class RingBuffer:
         return ts[mask], acc[mask], gyr[mask]
 
 
+@dataclass
+class AudioLevelBuffer:
+    capacity: int = 4096
+
+    def __post_init__(self):
+        self.timestamps = np.zeros(self.capacity, dtype=np.float64)
+        self.rms = np.zeros(self.capacity, dtype=np.float32)
+        self.peak = np.zeros(self.capacity, dtype=np.float32)
+        self.write_idx = 0
+        self.count = 0
+
+    def append(self, timestamp: float, rms: float, peak: float) -> None:
+        idx = self.write_idx
+        self.timestamps[idx] = timestamp
+        self.rms[idx] = rms
+        self.peak[idx] = peak
+        self.write_idx = (idx + 1) % self.capacity
+        self.count = min(self.count + 1, self.capacity)
+
+    def latest_timestamp(self) -> float:
+        if self.count == 0:
+            return 0.0
+        latest_idx = (self.write_idx - 1) % self.capacity
+        return float(self.timestamps[latest_idx])
+
+    def recent(self, since_ts: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self.count == 0:
+            return (
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.float32),
+            )
+
+        if self.count < self.capacity:
+            ts = self.timestamps[: self.count]
+            rms = self.rms[: self.count]
+            peak = self.peak[: self.count]
+        else:
+            ts = np.concatenate(
+                [self.timestamps[self.write_idx :], self.timestamps[: self.write_idx]],
+                axis=0,
+            )
+            rms = np.concatenate(
+                [self.rms[self.write_idx :], self.rms[: self.write_idx]],
+                axis=0,
+            )
+            peak = np.concatenate(
+                [self.peak[self.write_idx :], self.peak[: self.write_idx]],
+                axis=0,
+            )
+
+        mask = ts >= since_ts
+        return ts[mask], rms[mask], peak[mask]
+
+
 class RingMiniPlotWidget(QWidget):
-    def __init__(self, address: str, ring_name: str, buffer_ref: RingBuffer):
+    def __init__(
+        self,
+        address: str,
+        ring_name: str,
+        buffer_ref: RingBuffer,
+        audio_buffer_ref: AudioLevelBuffer,
+    ):
         super().__init__()
         self.address = address
         self.ring_name = ring_name
         self.buffer_ref = buffer_ref
+        self.audio_buffer_ref = audio_buffer_ref
         self.window_seconds = 5.0
         self.auto_scale = True
         self.acc_scale = 20.0
         self.gyr_scale = 1200.0
-        self.setMinimumHeight(260)
+        self.setMinimumHeight(320)
 
     def set_window_seconds(self, value: float) -> None:
         self.window_seconds = value
@@ -111,19 +221,29 @@ class RingMiniPlotWidget(QWidget):
         painter.fillRect(self.rect(), QColor("#ffffff"))
 
         latest_ts = self.buffer_ref.latest_timestamp()
-        window_end = latest_ts if latest_ts > 0 else time.time()
+        latest_audio_ts = self.audio_buffer_ref.latest_timestamp()
+        window_end = max(latest_ts, latest_audio_ts, time.time())
         since_ts = window_end - self.window_seconds
         ts, acc, gyr = self.buffer_ref.recent(since_ts)
+        audio_ts, audio_rms, audio_peak = self.audio_buffer_ref.recent(since_ts)
 
         margin = 10
         top_space = 4
-        panel_h = (self.height() - top_space - margin * 3) // 2
-        acc_rect = (margin, top_space + margin, self.width() - margin * 2, panel_h)
+        total_h = self.height() - top_space - margin * 4
+        imu_panel_h = int(total_h * 0.38)
+        audio_panel_h = max(56, total_h - imu_panel_h * 2)
+        acc_rect = (margin, top_space + margin, self.width() - margin * 2, imu_panel_h)
         gyr_rect = (
             margin,
-            top_space + margin * 2 + panel_h,
+            top_space + margin * 2 + imu_panel_h,
             self.width() - margin * 2,
-            panel_h,
+            imu_panel_h,
+        )
+        audio_rect = (
+            margin,
+            top_space + margin * 3 + imu_panel_h * 2,
+            self.width() - margin * 2,
+            audio_panel_h,
         )
 
         self._draw_panel(
@@ -142,6 +262,7 @@ class RingMiniPlotWidget(QWidget):
             self.gyr_scale,
             axis_colors=GYR_AXIS_COLORS,
         )
+        self._draw_audio_panel(painter, audio_rect, audio_ts, audio_rms, audio_peak)
 
     def _draw_panel(
         self,
@@ -233,6 +354,90 @@ class RingMiniPlotWidget(QWidget):
             pad = max(pad, 1.0)
         return ymin - pad, ymax + pad
 
+    def _draw_audio_panel(
+        self,
+        painter: QPainter,
+        rect: tuple[int, int, int, int],
+        ts: np.ndarray,
+        rms: np.ndarray,
+        peak: np.ndarray,
+    ) -> None:
+        x, y, w, h = rect
+        painter.setPen(QColor("#e2e8f0"))
+        painter.drawRect(x, y, w, h)
+        painter.setPen(QColor("#94a3b8"))
+        painter.drawText(x + 8, y + 16, "AUDIO")
+
+        if ts.size < 2 or rms.size < 2 or peak.size < 2:
+            painter.drawText(x + 56, y + h // 2 + 4, "音频未传输")
+            return
+
+        axis_w = 34
+        plot_x = x + axis_w
+        plot_w = max(10, w - axis_w - 6)
+        painter.drawLine(plot_x, y, plot_x, y + h)
+
+        self._draw_audio_fill(
+            painter,
+            x=plot_x,
+            y=y,
+            w=plot_w,
+            h=h,
+            ts=ts,
+            data=peak,
+            ts_min=ts[0],
+            ts_max=ts[-1],
+            color=QColor(245, 158, 11, 70),
+        )
+        painter.setPen(QPen(QColor("#0EA5E9"), 1))
+        self._draw_series(
+            painter,
+            x=plot_x,
+            y=y,
+            w=plot_w,
+            h=h,
+            ts=ts,
+            data=rms,
+            ts_min=ts[0],
+            ts_max=ts[-1],
+            y_min=0.0,
+            y_max=1.0,
+        )
+
+    def _draw_audio_fill(
+        self,
+        painter: QPainter,
+        *,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        ts: np.ndarray,
+        data: np.ndarray,
+        ts_min: float,
+        ts_max: float,
+        color: QColor,
+    ) -> None:
+        if data.size < 2:
+            return
+
+        max_points = max(80, w // 2)
+        stride = max(1, data.size // max_points)
+        if stride > 1:
+            ts = ts[::stride]
+            data = data[::stride]
+
+        denom_x = max(1e-6, ts_max - ts_min)
+        x_vals = x + ((ts - ts_min) / denom_x) * w
+        baseline = y + h
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        bar_w = max(1, w // max(1, data.size))
+        for idx in range(data.size):
+            bar_h = int(float(np.clip(data[idx], 0.0, 1.0)) * (h - 2))
+            painter.drawRect(int(x_vals[idx]), baseline - bar_h, bar_w, bar_h)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
     def _draw_series(
         self,
         painter: QPainter,
@@ -273,7 +478,13 @@ class RingMiniPlotWidget(QWidget):
 
 
 class RingPlotCard(QFrame):
-    def __init__(self, address: str, ring_name: str, buffer_ref: RingBuffer):
+    def __init__(
+        self,
+        address: str,
+        ring_name: str,
+        buffer_ref: RingBuffer,
+        audio_buffer_ref: AudioLevelBuffer,
+    ):
         super().__init__()
         self.setProperty("class", "panel")
         layout = QVBoxLayout(self)
@@ -301,12 +512,20 @@ class RingPlotCard(QFrame):
         unit_acc.setProperty("class", "sub-text")
         unit_gyro = QLabel("GYR (rad/s)")
         unit_gyro.setProperty("class", "sub-text")
+        unit_audio = QLabel("AUDIO (peak + RMS)")
+        unit_audio.setProperty("class", "sub-text")
         unit_row.addWidget(unit_acc)
         unit_row.addWidget(unit_gyro)
+        unit_row.addWidget(unit_audio)
         unit_row.addStretch()
         layout.addLayout(unit_row)
 
-        self.plot = RingMiniPlotWidget(address=address, ring_name=ring_name, buffer_ref=buffer_ref)
+        self.plot = RingMiniPlotWidget(
+            address=address,
+            ring_name=ring_name,
+            buffer_ref=buffer_ref,
+            audio_buffer_ref=audio_buffer_ref,
+        )
         layout.addWidget(self.plot)
 
     def _legend_label(self, text: str, color: QColor) -> QLabel:
@@ -320,10 +539,12 @@ class RingPlotCard(QFrame):
 class ImuVisualizerWindow(RingStreamWindowBase):
     def __init__(self, host: str, port: int):
         super().__init__(host=host, port=port)
-        self.setWindowTitle("高性能 IMU 可视化")
-        self.resize(1240, 800)
+        self.setWindowTitle("高性能 IMU/音频可视化")
+        self.resize(1400, 1000)
 
         self.buffers: dict[str, RingBuffer] = {}
+        self.audio_buffers: dict[str, AudioLevelBuffer] = {}
+        self.audio_decoders: dict[str, AdpcmDecoder] = {}
         self.cards: dict[str, RingPlotCard] = {}
         self._subscription_applied = False
 
@@ -355,9 +576,9 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         top_layout.setContentsMargins(16, 14, 16, 14)
         top_layout.setSpacing(10)
 
-        title = QLabel("多戒指 IMU 实时可视化")
+        title = QLabel("多戒指 IMU/音频实时可视化")
         title.setProperty("class", "title")
-        subtitle = QLabel("多戒指模式将生成多个小窗口卡片，每个卡片单独渲染一个戒指。")
+        subtitle = QLabel("每个戒指卡片同时显示 IMU 曲线，并在有音频流时绘制低开销的音频能量视图。")
         subtitle.setProperty("class", "sub-text")
         subtitle.setWordWrap(True)
 
@@ -469,9 +690,14 @@ class ImuVisualizerWindow(RingStreamWindowBase):
             )
 
     def handle_stream_message(self, message: dict) -> None:
-        if message.get("type") != "imu":
+        msg_type = message.get("type")
+        if msg_type == "imu":
+            self._handle_imu_message(message)
             return
+        if msg_type == "audio":
+            self._handle_audio_message(message)
 
+    def _handle_imu_message(self, message: dict) -> None:
         address = str(message.get("address", ""))
         if not address:
             return
@@ -490,6 +716,43 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         if address not in self.buffers:
             self.buffers[address] = RingBuffer()
         self.buffers[address].append(timestamp, acc, gyr)
+
+    def _handle_audio_message(self, message: dict) -> None:
+        address = str(message.get("address", ""))
+        if not address:
+            return
+
+        audio_type = int(message.get("audio_type", -1))
+        if audio_type != 1:
+            return
+
+        data_b64 = message.get("data_b64", "")
+        if not isinstance(data_b64, str) or not data_b64:
+            return
+
+        try:
+            raw_audio = base64.b64decode(data_b64)
+        except Exception:
+            return
+
+        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
+        timestamp = self._resolve_event_timestamp(host_ts)
+        decoder = self.audio_decoders.setdefault(address, AdpcmDecoder())
+        pcm = decoder.decode_packet(raw_audio)
+        if not pcm:
+            return
+
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return
+
+        normalized = samples / 32768.0
+        rms = float(np.sqrt(np.mean(normalized * normalized)))
+        peak = float(np.max(np.abs(normalized)))
+
+        if address not in self.audio_buffers:
+            self.audio_buffers[address] = AudioLevelBuffer()
+        self.audio_buffers[address].append(timestamp, rms, peak)
 
     def _resolve_event_timestamp(self, host_ts: float) -> float:
         now = time.time()
@@ -540,12 +803,19 @@ class ImuVisualizerWindow(RingStreamWindowBase):
                 continue
             if address not in self.buffers:
                 self.buffers[address] = RingBuffer()
+            if address not in self.audio_buffers:
+                self.audio_buffers[address] = AudioLevelBuffer()
             if address in self.cards:
                 continue
 
             ring_meta = self.ring_info.get(address, {})
             ring_name = str(ring_meta.get("name", "Unknown"))
-            card = RingPlotCard(address=address, ring_name=ring_name, buffer_ref=self.buffers[address])
+            card = RingPlotCard(
+                address=address,
+                ring_name=ring_name,
+                buffer_ref=self.buffers[address],
+                audio_buffer_ref=self.audio_buffers[address],
+            )
             card.plot.set_window_seconds(float(self.window_slider.value()))
             card.plot.set_scale_mode(
                 auto_scale=self.auto_scale_box.isChecked(),
@@ -559,7 +829,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
 
     def apply_subscription(self) -> None:
         self._subscription_applied = True
-        self.send_subscription(["imu"], empty_behavior="none")
+        self.send_subscription(["imu", "audio"], empty_behavior="none")
         self._refresh_cards()
 
     def refresh_plots(self) -> None:
