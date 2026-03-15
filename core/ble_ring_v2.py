@@ -3,11 +3,12 @@ import os
 import time
 import math
 import asyncio
+import inspect
 import struct
 from bleak import BleakClient
 import queue
 from types import FunctionType
-from typing import Tuple
+from typing import Awaitable, Callable, Tuple
 
 import math
 import numpy as np
@@ -245,7 +246,10 @@ class BLERing:
         audio_callback=None,
         imu_int8_callback=None,
         update_view_callback=None,
+        reconnect_success_callback: Callable[[str], Awaitable[None] | None] | None = None,
         imu_freq=200.0,
+        auto_reconnect: bool = True,
+        reconnect_interval: float = 2.0,
     ):
         self.address = address
         self.index = index
@@ -262,12 +266,18 @@ class BLERing:
         self.audio_callback = audio_callback
         self.imu_int8_callback = imu_int8_callback
         self.update_view_callback = update_view_callback
+        self.reconnect_success_callback = reconnect_success_callback
         self.acc_fsr = "0"
         self.gyro_fsr = "0"
         self.imu_freq = imu_freq
         self.client = None
         self.connected = False
         self.action_queue = queue.Queue()
+        self.auto_reconnect = bool(auto_reconnect)
+        self.reconnect_interval = float(reconnect_interval)
+        self._manual_disconnect = False
+        self._connect_lock = asyncio.Lock()
+        self._reconnect_task: asyncio.Task | None = None
 
         # timestamp related
         self.ring_timestamps = []
@@ -293,6 +303,10 @@ class BLERing:
         self.time_calib_slope = 0.0
         self.is_time_calibrated = False
 
+    @property
+    def is_reconnecting(self) -> bool:
+        return self._reconnect_task is not None and not self._reconnect_task.done()
+
     def on_disconnect(self, clients):
         _ = clients
         self.connected = False
@@ -304,8 +318,64 @@ class BLERing:
         self.imu_fps_start_time = None
         self.audio_fps_start_time = None
         self.is_time_calibrated = False
+        if self.auto_reconnect and not self._manual_disconnect:
+            self._schedule_reconnect()
         if self.update_view_callback is not None:
             self.update_view_callback(self.address)
+
+    def set_auto_reconnect(self, enabled: bool):
+        self.auto_reconnect = bool(enabled)
+        if not self.auto_reconnect:
+            self._cancel_reconnect_task()
+        elif not self.connected and not self._manual_disconnect:
+            self._schedule_reconnect()
+
+    def _cancel_reconnect_task(self):
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        self._reconnect_task = None
+
+    def cancel_reconnect(self):
+        self._manual_disconnect = True
+        self._cancel_reconnect_task()
+        if self.update_view_callback is not None:
+            self.update_view_callback(self.address)
+
+    def _schedule_reconnect(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = loop.create_task(self._reconnect_loop())
+
+    async def _invoke_reconnect_success_callback(self):
+        if self.reconnect_success_callback is None:
+            return
+        result = self.reconnect_success_callback(self.address)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _reconnect_loop(self):
+        while self.auto_reconnect and not self._manual_disconnect and not self.connected:
+            try:
+                print(f"尝试自动重连 {self.address}")
+                await self.connect(is_reconnect=True)
+                if self.connected:
+                    print(f"自动重连成功 {self.address}")
+                    self._reconnect_task = None
+                    await self._invoke_reconnect_success_callback()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"自动重连失败 {self.address}: {exc}")
+
+            try:
+                await asyncio.sleep(self.reconnect_interval)
+            except asyncio.CancelledError:
+                raise
 
     def notify_callback(self, sender, data: bytearray):
         # print(len(data))
@@ -479,37 +549,49 @@ class BLERing:
                 imu = IMUData(*calibrated, time.perf_counter())
                 self.imu_callback(self.index, imu)
 
-    async def connect(self, callback: FunctionType = None):
-        self.client = BleakClient(
-            self.address, disconnected_callback=self.on_disconnect
-        )
-        try:
-            print(f"Try to connect to {self.address}")
-            await self.client.connect()
-        except Exception as e:
-            print(e)
-            print(f"Failed to connect to {self.address}")
-            return
+    async def connect(self, callback: FunctionType = None, is_reconnect: bool = False):
+        async with self._connect_lock:
+            if self.connected and self.client is not None and self.client.is_connected:
+                return
 
-        print("Start notify")
-        await self.client.start_notify(
-            NotifyProtocol.READ_CHARACTERISTIC, self.notify_callback
-        )
-        await asyncio.sleep(0.5)
-        await self.client.write_gatt_char(
-            NotifyProtocol.WRITE_CHARACTERISTIC, NotifyProtocol.OPEN_6AXIS_IMU
-        )
-        await self.client.write_gatt_char(
-            NotifyProtocol.WRITE_CHARACTERISTIC, NotifyProtocol.GET_BATTERY_LEVEL
-        )
-        await asyncio.sleep(0.5)
+            self._manual_disconnect = False
+            if not is_reconnect:
+                self._cancel_reconnect_task()
 
-        if self.client.is_connected:
-            print("Connected")
-            self.connected = True
-            if callback is not None:
-                #   callback(self.index)
-                callback()
+            self.client = BleakClient(
+                self.address, disconnected_callback=self.on_disconnect
+            )
+            try:
+                print(f"Try to connect to {self.address}")
+                await self.client.connect()
+                print("Start notify")
+                await self.client.start_notify(
+                    NotifyProtocol.READ_CHARACTERISTIC, self.notify_callback
+                )
+                await asyncio.sleep(0.5)
+                await self.client.write_gatt_char(
+                    NotifyProtocol.WRITE_CHARACTERISTIC, NotifyProtocol.OPEN_6AXIS_IMU
+                )
+                await self.client.write_gatt_char(
+                    NotifyProtocol.WRITE_CHARACTERISTIC, NotifyProtocol.GET_BATTERY_LEVEL
+                )
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(e)
+                print(f"Failed to connect to {self.address}")
+                self.connected = False
+                try:
+                    if self.client is not None and self.client.is_connected:
+                        await self.client.disconnect()
+                except Exception:
+                    pass
+                return
+
+            if self.client.is_connected:
+                print("Connected")
+                self.connected = True
+                if callback is not None:
+                    callback()
 
     async def send_command(self, command: bytearray):
         await self.client.write_gatt_char(NotifyProtocol.WRITE_CHARACTERISTIC, command)
@@ -579,8 +661,21 @@ class BLERing:
         print(f"Stopped recording IMU to {self.imu_filename}")
 
     async def disconnect(self):
-        await self.client.stop_notify(NotifyProtocol.READ_CHARACTERISTIC)
-        await self.client.disconnect()
+        self._manual_disconnect = True
+        self._cancel_reconnect_task()
+        if self.client is None:
+            self.connected = False
+            return
+        try:
+            if self.client.is_connected:
+                await self.client.stop_notify(NotifyProtocol.READ_CHARACTERISTIC)
+        except Exception:
+            pass
+        try:
+            if self.client.is_connected:
+                await self.client.disconnect()
+        finally:
+            self.connected = False
         print(f"Disconnected from {self.address}")
 
     def update_audio_fps(self):

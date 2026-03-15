@@ -60,6 +60,7 @@ class RingDevice:
         self.address = address
         self.name = name
         self.is_connected = False
+        self.is_reconnecting = False
         self.is_recording = False
         self.is_calibrated = False
 
@@ -405,7 +406,18 @@ class DeviceCard(QFrame):
     def refresh_view(self):
         self.lbl_name.setText(self.device.name)
 
-        if self.device.is_connected:
+        if self.device.is_reconnecting:
+            self.setProperty("class", "device-card")
+            self.lbl_status.setText("● 正在重连")
+            self.lbl_status.setStyleSheet("color: #dd6b20; font-weight: bold;")
+
+            self.btn_connect.setText("取消重连")
+            self.btn_connect.setProperty("class", "btn-gray")
+
+            self.btn_sync.setEnabled(False)
+            self.btn_sync.setProperty("class", "btn-gray")
+
+        elif self.device.is_connected:
             self.setProperty("class", "device-card-connected")
             self.lbl_status.setText(
                 f"● 已连接（{'已校准' if self.device.is_calibrated else '未校准'}）"
@@ -461,7 +473,6 @@ class MainWindow(QMainWindow):
         self._stream_started = False
         self._port_switch_task: asyncio.Task | None = None
         self._stream_mode_task: asyncio.Task | None = None
-
         self.init_ui()
 
     def init_ui(self):
@@ -500,6 +511,10 @@ class MainWindow(QMainWindow):
         self.chk_audio_stream.setChecked(False)
         self.chk_audio_stream.stateChanged.connect(self.on_stream_mode_changed)
 
+        self.chk_auto_reconnect = QCheckBox("自动重连")
+        self.chk_auto_reconnect.setChecked(True)
+        self.chk_auto_reconnect.stateChanged.connect(self.on_auto_reconnect_changed)
+
         self.lbl_msg = QLabel("就绪")
         self.lbl_msg.setObjectName("statusTag")
 
@@ -511,6 +526,8 @@ class MainWindow(QMainWindow):
         row_secondary.addWidget(QLabel("转发流"))
         row_secondary.addWidget(self.chk_imu_stream)
         row_secondary.addWidget(self.chk_audio_stream)
+        row_secondary.addSpacing(12)
+        row_secondary.addWidget(self.chk_auto_reconnect)
         row_secondary.addStretch()
         top_layout.addLayout(row_primary)
         top_layout.addLayout(row_secondary)
@@ -624,6 +641,13 @@ class MainWindow(QMainWindow):
             self._stream_mode_task.cancel()
         self._stream_mode_task = asyncio.create_task(self.apply_stream_mode_to_connected())
 
+    def on_auto_reconnect_changed(self, _state: int):
+        enabled = self.chk_auto_reconnect.isChecked()
+        for device in self.devices.values():
+            if device.ring_logic is not None:
+                device.ring_logic.set_auto_reconnect(enabled)
+        self.lbl_msg.setText(f"自动重连已{'开启' if enabled else '关闭'}")
+
     async def apply_stream_mode_to_connected(self):
         enabled_imu = self.chk_imu_stream.isChecked()
         enabled_audio = self.chk_audio_stream.isChecked()
@@ -686,6 +710,41 @@ class MainWindow(QMainWindow):
         self.app_processes.append(process)
         self.lbl_msg.setText(f"{app_name} 已启动（PID: {process.pid}）")
 
+    async def finalize_device_connection(
+        self, device: RingDevice, *, is_reconnect: bool
+    ) -> tuple[bool, str]:
+        device.is_connected = True
+        device.is_calibrated = False
+        await self.apply_stream_mode_to_device(
+            device=device,
+            enabled_imu=self.chk_imu_stream.isChecked(),
+            enabled_audio=self.chk_audio_stream.isChecked(),
+        )
+        loaded, calib_msg = await DeviceService.load_calib_if_consistent(device)
+        device.is_calibrated = loaded
+        self.stream_hub.upsert_ring(device.address, device.name, connected=True)
+        self.refresh_card(device.address)
+        if is_reconnect:
+            if loaded:
+                self.lbl_msg.setText(f"{device.name} 已自动重连，{calib_msg}")
+            else:
+                self.lbl_msg.setText(f"{device.name} 已自动重连，未同步（{calib_msg}）")
+        return loaded, calib_msg
+
+    async def handle_reconnect_success(self, address: str):
+        try:
+            device = self.devices.get(address)
+            if device is None or device.ring_logic is None or not device.ring_logic.connected:
+                return
+            await self.finalize_device_connection(device, is_reconnect=True)
+        except Exception as exc:
+            device = self.devices.get(address)
+            device_name = device.name if device is not None else address
+            self.lbl_msg.setText(f"{device_name} 自动重连后恢复失败: {exc}")
+            import traceback
+
+            traceback.print_exc()
+
     # ------------------------------------------------------------------------
     # 异步逻辑核心
     # ------------------------------------------------------------------------
@@ -744,6 +803,10 @@ class MainWindow(QMainWindow):
                         address, audio_type, audio, local_ts, host_ts
                     ),
                     update_view_callback=lambda address: self.refresh_card(address),
+                    reconnect_success_callback=lambda address, self=self: self.handle_reconnect_success(
+                        address
+                    ),
+                    auto_reconnect=self.chk_auto_reconnect.isChecked(),
                 )
                 self.devices[addr] = new_device
                 self.stream_hub.upsert_ring(addr, name, connected=False)
@@ -766,8 +829,12 @@ class MainWindow(QMainWindow):
         if device is None:
             return
 
+        ring = device.ring_logic
         ring_connected = bool(
-            device.ring_logic is not None and getattr(device.ring_logic, "connected", False)
+            ring is not None and getattr(ring, "connected", False)
+        )
+        device.is_reconnecting = bool(
+            ring is not None and getattr(ring, "is_reconnecting", False)
         )
         if device.is_connected != ring_connected:
             device.is_connected = ring_connected
@@ -775,11 +842,16 @@ class MainWindow(QMainWindow):
                 device.is_recording = False
                 device.is_calibrated = False
                 self.lbl_msg.setText(f"{device.name} 已自动断开")
+                if (
+                    ring is not None
+                    and ring.auto_reconnect
+                    and not getattr(ring, "_manual_disconnect", False)
+                ):
+                    self.lbl_msg.setText(f"{device.name} 已断开，正在自动重连...")
             self.stream_hub.upsert_ring(
                 device.address, device.name, connected=device.is_connected
             )
 
-        ring = device.ring_logic
         device.is_calibrated = bool(
             ring is not None and getattr(ring, "is_time_calibrated", False)
         )
@@ -868,7 +940,18 @@ class MainWindow(QMainWindow):
 
         try:
             if action == "connect":
-                if device.is_connected:
+                if device.is_reconnecting:
+                    self.lbl_msg.setText(f"正在取消 {device.name} 的自动重连...")
+                    if device.ring_logic is not None:
+                        device.ring_logic.cancel_reconnect()
+                    device.is_reconnecting = False
+                    device.is_connected = False
+                    device.is_calibrated = False
+                    self.stream_hub.upsert_ring(
+                        device.address, device.name, connected=False
+                    )
+                    self.lbl_msg.setText(f"{device.name} 已取消自动重连")
+                elif device.is_connected:
                     self.lbl_msg.setText(f"正在断开 {device.name}...")
                     await DeviceService.disconnect_device(device)
                     device.is_connected = False
@@ -880,19 +963,8 @@ class MainWindow(QMainWindow):
                 else:
                     self.lbl_msg.setText(f"正在连接 {device.name}...")
                     await DeviceService.connect_device(device)
-                    device.is_connected = True
-                    device.is_calibrated = False
-                    await self.apply_stream_mode_to_device(
-                        device=device,
-                        enabled_imu=self.chk_imu_stream.isChecked(),
-                        enabled_audio=self.chk_audio_stream.isChecked(),
-                    )
-                    loaded, calib_msg = await DeviceService.load_calib_if_consistent(
-                        device
-                    )
-                    device.is_calibrated = loaded
-                    self.stream_hub.upsert_ring(
-                        device.address, device.name, connected=True
+                    loaded, calib_msg = await self.finalize_device_connection(
+                        device, is_reconnect=False
                     )
                     if loaded:
                         self.lbl_msg.setText(f"{device.name} 连接成功，{calib_msg}")
