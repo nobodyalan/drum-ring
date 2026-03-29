@@ -19,4 +19,5 @@ dependencies = [
     "tsai>=0.4.1",
     "tqdm>=4.67.3",
     "vqf>=2.1.1",
+    "cryptography>=46.0.6",
 ]

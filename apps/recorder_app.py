@@ -1,14 +1,16 @@
 import argparse
 import base64
+import io
 import os
 import re
 import struct
 import sys
 import time
 import wave
+from collections import deque
 
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,6 +22,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from common.file_saver import stash
 from common.stream_window import RingStreamWindowBase
 from common.ui_style import APP_STYLE_SHEET
 
@@ -84,17 +87,30 @@ class RecorderWindow(RingStreamWindowBase):
 
         self.recording = False
         self.record_start_ts = 0
+        self.record_start_time = 0.0
+        self.last_record_elapsed = 0.0
         self.imu_records: dict[str, list[list[float]]] = {}
         self.audio_pcm: dict[str, bytearray] = {}
         self.audio_decoders: dict[str, AdpcmDecoder] = {}
+        self.imu_frame_count = 0
+        self.audio_frame_count = 0
+        self.imu_recent_frames: deque[tuple[float, int]] = deque()
+        self.audio_recent_frames: deque[tuple[float, int]] = deque()
 
         self.status_label = QLabel("数据流状态：未连接")
         self.status_label.setObjectName("statusTag")
         self.metric_label = QLabel("就绪")
+        self.realtime_fps_label = QLabel("实时帧率：--")
+        self.overall_fps_label = QLabel("总体帧率：--")
+        self.duration_label = QLabel("录制时长：00:00:00")
+        self.metrics_timer = QTimer(self)
+        self.metrics_timer.setInterval(250)
+        self.metrics_timer.timeout.connect(self.refresh_metrics)
 
         self._build_ui()
         self.set_stream_status_label(self.status_label)
         self._bind_signals()
+        self.refresh_metrics()
         self.client.start()
 
     def _build_ui(self):
@@ -129,7 +145,7 @@ class RecorderWindow(RingStreamWindowBase):
         self.chk_imu = QCheckBox("录制 IMU")
         self.chk_imu.setChecked(True)
         self.chk_audio = QCheckBox("录制音频")
-        self.chk_audio.setChecked(False)
+        self.chk_audio.setChecked(True)
         stream_row.addWidget(self.chk_imu)
         stream_row.addWidget(self.chk_audio)
         stream_row.addStretch()
@@ -147,6 +163,9 @@ class RecorderWindow(RingStreamWindowBase):
         panel_layout.addLayout(actions)
 
         panel_layout.addWidget(self.metric_label)
+        panel_layout.addWidget(self.realtime_fps_label)
+        panel_layout.addWidget(self.overall_fps_label)
+        panel_layout.addWidget(self.duration_label)
         root.addWidget(panel)
 
     def _bind_signals(self):
@@ -186,21 +205,32 @@ class RecorderWindow(RingStreamWindowBase):
         self.client.send_command({"cmd": "subscribe", "rings": rings, "streams": streams})
 
         self.record_start_ts = int(time.time())
+        self.record_start_time = time.perf_counter()
+        self.last_record_elapsed = 0.0
         self.recording = True
         self.imu_records.clear()
         self.audio_pcm.clear()
         self.audio_decoders.clear()
+        self.imu_frame_count = 0
+        self.audio_frame_count = 0
+        self.imu_recent_frames.clear()
+        self.audio_recent_frames.clear()
 
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.metric_label.setText(
             f"录制中... rings={len(rings) if rings else 'ALL'} streams={','.join(streams)}"
         )
+        self.refresh_metrics()
+        self.metrics_timer.start()
 
     def stop_recording(self):
         if not self.recording:
             return
+        stop_time = time.perf_counter()
+        self.last_record_elapsed = max(stop_time - self.record_start_time, 0.0)
         self.recording = False
+        self.metrics_timer.stop()
 
         self.send_subscription(["imu"], empty_behavior="none")
 
@@ -209,6 +239,7 @@ class RecorderWindow(RingStreamWindowBase):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.metric_label.setText(f"录制完成，保存文件数: {saved}")
+        self.refresh_metrics()
 
     def on_imu_message(self, message: dict):
         address = str(message.get("address", ""))
@@ -224,6 +255,7 @@ class RecorderWindow(RingStreamWindowBase):
         host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
         row = [local_ts, host_ts] + [float(v) for v in acc] + [float(v) for v in gyr]
         self.imu_records.setdefault(address, []).append(row)
+        self._register_frame("imu", 1)
 
     def on_audio_message(self, message: dict):
         address = str(message.get("address", ""))
@@ -244,6 +276,7 @@ class RecorderWindow(RingStreamWindowBase):
         decoder = self.audio_decoders.setdefault(address, AdpcmDecoder())
         pcm = decoder.decode_packet(raw_audio)
         self.audio_pcm.setdefault(address, bytearray()).extend(pcm)
+        self._register_frame("audio", 1)
 
     def save_records(self) -> int:
         count = 0
@@ -256,8 +289,16 @@ class RecorderWindow(RingStreamWindowBase):
                     continue
                 ring_name = str(self.ring_info.get(address, {}).get("name", "Unknown"))
                 safe_name = self._safe_name(ring_name)
-                filename = f"data/{safe_name}_{address}_{start_ts}.npy"
-                np.save(filename, np.asarray(rows, dtype=np.float64))
+                safe_address = self._safe_name(address)
+                plain_name = f"{safe_name}_{safe_address}_{start_ts}.npy"
+                filename = f"data/{plain_name}.enc"
+                buffer = io.BytesIO()
+                np.save(buffer, np.asarray(rows, dtype=np.float64))
+                stash(
+                    filename,
+                    buffer.getvalue(),
+                    original_name=plain_name,
+                )
                 count += 1
 
         if self.audio_pcm:
@@ -267,12 +308,20 @@ class RecorderWindow(RingStreamWindowBase):
                     continue
                 ring_name = str(self.ring_info.get(address, {}).get("name", "Unknown"))
                 safe_name = self._safe_name(ring_name)
-                filename = f"data/{safe_name}_{address}_{start_ts}.wav"
-                with wave.open(filename, "wb") as wavfile:
+                safe_address = self._safe_name(address)
+                plain_name = f"{safe_name}_{safe_address}_{start_ts}.wav"
+                filename = f"data/{plain_name}.enc"
+                buffer = io.BytesIO()
+                with wave.open(buffer, "wb") as wavfile:
                     wavfile.setnchannels(1)
                     wavfile.setsampwidth(2)
                     wavfile.setframerate(16000)
                     wavfile.writeframes(bytes(pcm))
+                stash(
+                    filename,
+                    buffer.getvalue(),
+                    original_name=plain_name,
+                )
                 count += 1
 
         return count
@@ -280,6 +329,74 @@ class RecorderWindow(RingStreamWindowBase):
     def _safe_name(self, text: str) -> str:
         sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
         return sanitized or "ring"
+
+    def _register_frame(self, stream: str, count: int) -> None:
+        now = time.perf_counter()
+        if stream == "imu":
+            self.imu_frame_count += count
+            self.imu_recent_frames.append((now, count))
+        elif stream == "audio":
+            self.audio_frame_count += count
+            self.audio_recent_frames.append((now, count))
+        self._trim_recent_frames(now)
+
+    def _trim_recent_frames(self, now: float) -> None:
+        window_seconds = 1.0
+        cutoff = now - window_seconds
+        while self.imu_recent_frames and self.imu_recent_frames[0][0] < cutoff:
+            self.imu_recent_frames.popleft()
+        while self.audio_recent_frames and self.audio_recent_frames[0][0] < cutoff:
+            self.audio_recent_frames.popleft()
+
+    def _format_duration(self, seconds: float) -> str:
+        total_seconds = max(0, int(seconds))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _format_fps_group(self, imu_fps: float, audio_fps: float) -> str:
+        parts: list[str] = []
+        if self.chk_imu.isChecked():
+            parts.append(f"IMU {imu_fps:.1f}Hz")
+        if self.chk_audio.isChecked():
+            parts.append(f"音频 {audio_fps:.1f}Hz")
+        return " | ".join(parts) if parts else "--"
+
+    def refresh_metrics(self) -> None:
+        if self.recording and self.record_start_time > 0:
+            now = time.perf_counter()
+            elapsed = max(now - self.record_start_time, 1e-6)
+            self._trim_recent_frames(now)
+            realtime_window = min(elapsed, 1.0)
+            realtime_imu_fps = sum(count for _, count in self.imu_recent_frames) / realtime_window
+            realtime_audio_fps = sum(count for _, count in self.audio_recent_frames) / realtime_window
+            overall_imu_fps = self.imu_frame_count / elapsed
+            overall_audio_fps = self.audio_frame_count / elapsed
+
+            self.realtime_fps_label.setText(
+                f"实时帧率：{self._format_fps_group(realtime_imu_fps, realtime_audio_fps)}"
+            )
+            self.overall_fps_label.setText(
+                f"总体帧率：{self._format_fps_group(overall_imu_fps, overall_audio_fps)}"
+            )
+            self.duration_label.setText(f"录制时长：{self._format_duration(elapsed)}")
+            return
+
+        if self.record_start_time > 0 and self.last_record_elapsed > 0:
+            overall_imu_fps = self.imu_frame_count / self.last_record_elapsed
+            overall_audio_fps = self.audio_frame_count / self.last_record_elapsed
+            self.realtime_fps_label.setText("实时帧率：--")
+            self.overall_fps_label.setText(
+                f"总体帧率：{self._format_fps_group(overall_imu_fps, overall_audio_fps)}"
+            )
+            self.duration_label.setText(
+                f"录制时长：{self._format_duration(self.last_record_elapsed)}"
+            )
+            return
+
+        self.realtime_fps_label.setText("实时帧率：--")
+        self.overall_fps_label.setText("总体帧率：--")
+        self.duration_label.setText("录制时长：00:00:00")
 
     def closeEvent(self, event):
         if self.recording:
