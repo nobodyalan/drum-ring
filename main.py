@@ -599,7 +599,14 @@ class MainWindow(QMainWindow):
             lambda: self.launch_app("apps/touchpad_app.py", "触控板")
         )
         apps_row.addWidget(btn_touchpad, 0, 6)
-        apps_row.setColumnStretch(7, 1)
+
+        btn_typering = QPushButton("戒指打字")
+        btn_typering.setProperty("class", "btn-primary")
+        btn_typering.clicked.connect(
+            lambda: self.launch_app("apps/typering_app.py", "戒指打字")
+        )
+        apps_row.addWidget(btn_typering, 0, 7)
+        apps_row.setColumnStretch(8, 1)
         apps_panel.setLayout(apps_row)
         main_layout.addWidget(apps_panel)
 
@@ -900,12 +907,21 @@ class MainWindow(QMainWindow):
         device = self.devices.get(address)
         if device is None:
             return
+        ring = device.ring_logic
+        tap_timestamp = ring.get_tap_timestamp() if hasattr(ring, "get_tap_timestamp") else None
+        release_timestamp = ring.get_release_timestamp() if hasattr(ring, "get_release_timestamp") else None
         self.stream_hub.publish_touch(
             address=address,
             name=device.name,
             host_timestamp=time.time(),
             action_code=int(action_code),
+            tap_timestamp=tap_timestamp,
+            release_timestamp=release_timestamp,
         )
+        if tap_timestamp is not None and hasattr(ring, "clear_tap_timestamp"):
+            ring.clear_tap_timestamp()
+        if release_timestamp is not None and hasattr(ring, "clear_release_timestamp"):
+            ring.clear_release_timestamp()
 
     def add_card_ui(self, device: RingDevice):
         card = DeviceCard(device)
@@ -1055,6 +1071,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setStyleSheet(STYLE_SHEET)
 
     font = QFont("Microsoft YaHei", 9)

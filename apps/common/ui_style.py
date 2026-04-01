@@ -4,6 +4,24 @@ QMainWindow {
 }
 QWidget {
     color: #4f6074;
+    background-color: #f5f7fa;
+}
+
+QMenuBar,
+QMenu,
+QAbstractScrollArea,
+QTextEdit,
+QPlainTextEdit,
+QListView,
+QTreeView,
+QTableView,
+QScrollArea,
+QAbstractItemView {
+    background-color: #ffffff;
+    color: #4f6074;
+    alternate-background-color: #f8fbfe;
+    selection-background-color: #dbe9f6;
+    selection-color: #2f3e52;
 }
 
 /* ---------- Panels ---------- */

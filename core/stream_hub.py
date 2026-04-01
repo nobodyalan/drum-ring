@@ -130,6 +130,8 @@ class ImuStreamHub:
         name: str,
         host_timestamp: float,
         action_code: int,
+        tap_timestamp: float | None = None,
+        release_timestamp: float | None = None,
     ) -> None:
         payload = {
             "type": "touch",
@@ -137,6 +139,8 @@ class ImuStreamHub:
             "name": name,
             "host_timestamp": host_timestamp,
             "action_code": action_code,
+            "tap_timestamp": tap_timestamp,
+            "release_timestamp": release_timestamp,
         }
         message = json.dumps(payload, ensure_ascii=False)
         for client in tuple(self._clients):
