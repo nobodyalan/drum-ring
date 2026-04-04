@@ -599,7 +599,21 @@ class MainWindow(QMainWindow):
             lambda: self.launch_app("apps/touchpad_app.py", "触控板")
         )
         apps_row.addWidget(btn_touchpad, 0, 6)
-        apps_row.setColumnStretch(7, 1)
+
+        btn_whisper_number = QPushButton("数字书写识别")
+        btn_whisper_number.setProperty("class", "btn-primary")
+        btn_whisper_number.clicked.connect(
+            lambda: self.launch_app("apps/whisper_number_touch_app.py", "数字书写识别")
+        )
+        apps_row.addWidget(btn_whisper_number, 0, 7)
+
+        btn_whisper_word = QPushButton("英文小写识别")
+        btn_whisper_word.setProperty("class", "btn-primary")
+        btn_whisper_word.clicked.connect(
+            lambda: self.launch_app("apps/whisper_word_touch_app.py", "英文小写识别")
+        )
+        apps_row.addWidget(btn_whisper_word, 0, 8)
+        apps_row.setColumnStretch(9, 1)
         apps_panel.setLayout(apps_row)
         main_layout.addWidget(apps_panel)
 
