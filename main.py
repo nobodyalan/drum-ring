@@ -613,7 +613,28 @@ class MainWindow(QMainWindow):
             lambda: self.launch_app("apps/whisper_word_touch_app.py", "英文小写识别")
         )
         apps_row.addWidget(btn_whisper_word, 0, 8)
-        apps_row.setColumnStretch(9, 1)
+
+        btn_swipe = QPushButton("Swipe 检测")
+        btn_swipe.setProperty("class", "btn-primary")
+        btn_swipe.clicked.connect(
+            lambda: self.launch_app("apps/swipe_realtime_app.py", "Swipe 检测")
+        )
+        apps_row.addWidget(btn_swipe, 0, 9)
+
+        btn_swipe_ctc = QPushButton("Swipe CTC 测试")
+        btn_swipe_ctc.setProperty("class", "btn-primary")
+        btn_swipe_ctc.clicked.connect(
+            lambda: self.launch_app("apps/swipe_ctc_test_app.py", "Swipe CTC 测试")
+        )
+        apps_row.addWidget(btn_swipe_ctc, 0, 10)
+
+        btn_snake = QPushButton("Snake")
+        btn_snake.setProperty("class", "btn-primary")
+        btn_snake.clicked.connect(
+            lambda: self.launch_app("apps/snake_app.py", "Snake")
+        )
+        apps_row.addWidget(btn_snake, 0, 11)
+        apps_row.setColumnStretch(12, 1)
         apps_panel.setLayout(apps_row)
         main_layout.addWidget(apps_panel)
 
