@@ -21,6 +21,7 @@
   - `apps/recorder_app.py`（多戒指 IMU/音频录制）
   - `apps/gesture_recognition_app.py`（手势识别与分戒指可视化计数）
   - `apps/touchpad_app.py`（移植自 `ring_app_touchpad` 的戒指触控板）
+  - `apps/typering_app.py`（双戒指 TypeRing 可视化打字）
 
 ## 环境要求
 
@@ -50,6 +51,7 @@ uv run python main.py
 4. 在顶部 `Port` 输入框切换应用数据流端口（运行中可切换）
 5. 使用顶部 `IMU` / `音频` checkbox 控制设备侧流开关
 6. 使用“录制中心”应用录制某几个戒指的 IMU/音频数据
+7. 使用“戒指打字”应用绑定左右手戒指并开始可视化打字
 
 ## 数据输出
 

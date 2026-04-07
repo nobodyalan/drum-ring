@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ahrs>=0.4.0",
     "bleak>=1.1.1",
+    "colorama>=0.4.6",
     "ipython>=9.10.0",
     "numpy>=2.0.2",
     "oneeurofilter>=0.2.1",
@@ -16,8 +17,10 @@ dependencies = [
     "pyquaternion>=0.9.9",
     "qasync>=0.28.0",
     "screeninfo>=0.8.1",
+    "torch>=2.6.0",
     "tsai>=0.4.1",
     "tqdm>=4.67.3",
     "vqf>=2.1.1",
     "cryptography>=46.0.6",
+    "multipledispatch>=1.0.0",
 ]

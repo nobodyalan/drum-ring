@@ -211,3 +211,5 @@ data/
 
 # tmp
 tmp*/
+
+.DS_Store

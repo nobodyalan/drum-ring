@@ -302,6 +302,8 @@ class BLERing:
         self.time_calib_intercept = 0.0
         self.time_calib_slope = 0.0
         self.is_time_calibrated = False
+        self.tap_timestamp = None
+        self.release_timestamp = None
 
     @property
     def is_reconnecting(self) -> bool:
@@ -477,12 +479,16 @@ class BLERing:
             pass
 
         elif data[2] == 0x61 and data[3] == 0x2:
-            if data[4] == 1:
+            if data[4] in (0, 1):
+                self.tap_timestamp = time.perf_counter()
                 if self.touch_callback is not None:
-                    self.touch_callback(self.index, 2)
-            else:
+                    self.touch_callback(self.index, 0)
+            elif data[4] == 5:
+                self.release_timestamp = time.perf_counter()
                 if self.touch_callback is not None:
-                    self.touch_callback(self.index, data[4])
+                    self.touch_callback(self.index, 5)
+            elif self.touch_callback is not None:
+                self.touch_callback(self.index, data[4])
 
         elif data[2] == 0x12 and data[3] == 0x0:
             self.battery_level = data[4]
@@ -677,6 +683,18 @@ class BLERing:
         finally:
             self.connected = False
         print(f"Disconnected from {self.address}")
+
+    def get_tap_timestamp(self):
+        return self.tap_timestamp
+
+    def clear_tap_timestamp(self):
+        self.tap_timestamp = None
+
+    def get_release_timestamp(self):
+        return self.release_timestamp
+
+    def clear_release_timestamp(self):
+        self.release_timestamp = None
 
     def update_audio_fps(self):
         self.audio_fps_count += 1
