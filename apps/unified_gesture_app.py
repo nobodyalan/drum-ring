@@ -178,12 +178,14 @@ class TouchpadRecognizerConfig:
 
 @dataclass(frozen=True)
 class AirmouseRecognizerConfig:
-    pointer_scale: float = 2000.0
+    pointer_scale: float = 4000.0
     min_move_abs: float = 0.05
     move_emit_interval_seconds: float = 1 / 60.0
     filter_min_cutoff: float = 1.0
     filter_beta: float = 0.2
     filter_d_cutoff: float = 1.0
+    cursor_home_x_ratio: float = 0.5
+    cursor_home_y_ratio: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -240,7 +242,11 @@ APP_CONFIG = UnifiedAppConfig(
         gesture_ckpt=APP_ROOT / "checkpoint" / "tap-94.pth",
         motion_ckpt=APP_ROOT / "checkpoint" / "tcnlstm.pt",
     ),
-    airmouse=AirmouseRecognizerConfig(),
+    airmouse=AirmouseRecognizerConfig(
+        pointer_scale=4000.0,
+        cursor_home_x_ratio=0.5,
+        cursor_home_y_ratio=0.5,
+    ),
 )
 
 
@@ -1329,17 +1335,18 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
         return self.rate_tracker.fps()
 
 
-class TouchpadCursorController:
-    def __init__(self, click_interval_seconds: float):
-        self.click_interval_seconds = click_interval_seconds
-        self.enabled = False
+class LocalCursorController:
+    def __init__(self):
         self.error = ""
         self.mouse_controller = None
         self.left = -10**9
         self.top = -10**9
         self.right = 10**9
         self.bottom = 10**9
-        self.last_down_time = 0.0
+        self.home_left = self.left
+        self.home_top = self.top
+        self.home_right = self.right
+        self.home_bottom = self.bottom
 
         if not HAS_TOUCHPAD_CURSOR_CONTROL:
             self.error = TOUCHPAD_CURSOR_CONTROL_ERROR or "pynput 不可用"
@@ -1354,6 +1361,14 @@ class TouchpadCursorController:
                     self.top = min(item.y for item in monitors)
                     self.right = max(item.x + item.width for item in monitors)
                     self.bottom = max(item.y + item.height for item in monitors)
+                    home_monitor = next(
+                        (item for item in monitors if bool(getattr(item, "is_primary", False))),
+                        monitors[0],
+                    )
+                    self.home_left = home_monitor.x
+                    self.home_top = home_monitor.y
+                    self.home_right = home_monitor.x + home_monitor.width
+                    self.home_bottom = home_monitor.y + home_monitor.height
         except Exception as exc:
             self.error = str(exc)
             self.mouse_controller = None
@@ -1361,32 +1376,30 @@ class TouchpadCursorController:
     def available(self) -> bool:
         return self.mouse_controller is not None and not self.error
 
-    def set_enabled(self, enabled: bool) -> None:
-        self.enabled = bool(enabled) and self.available()
+    def move_to(self, target_x: float, target_y: float) -> bool:
+        if self.mouse_controller is None:
+            return False
 
-    def handle_event(self, recognizer: str, event_name: str, data: dict[str, Any]) -> None:
-        if recognizer != RECOGNIZER_TOUCHPAD or not self.enabled or self.mouse_controller is None:
-            return
+        target_x = min(max(float(target_x), self.left), self.right)
+        target_y = min(max(float(target_y), self.top), self.bottom)
+        try:
+            self.mouse_controller.position = (target_x, target_y)
+        except Exception:
+            return False
+        return True
 
-        if event_name == "touch-down":
-            self.last_down_time = time.time()
-            return
+    def move_to_home_ratio(self, x_ratio: float, y_ratio: float) -> bool:
+        width = max(1.0, float(self.home_right - self.home_left))
+        height = max(1.0, float(self.home_bottom - self.home_top))
+        target_x = self.home_left + width * float(np.clip(x_ratio, 0.0, 1.0))
+        target_y = self.home_top + height * float(np.clip(y_ratio, 0.0, 1.0))
+        return self.move_to(target_x, target_y)
 
-        if event_name == "touch-up":
-            if time.time() - self.last_down_time < self.click_interval_seconds:
-                try:
-                    self.mouse_controller.click(mouse.Button.left)
-                except Exception:
-                    pass
-            return
-
-        if event_name != "move":
-            return
-
-        vx = float(data.get("move_x", 0.0) or 0.0)
-        vy = float(data.get("move_y", 0.0) or 0.0)
+    def move_by(self, vx: float, vy: float) -> bool:
+        if self.mouse_controller is None:
+            return False
         if vx == 0.0 and vy == 0.0:
-            return
+            return False
 
         try:
             cx, cy = self.mouse_controller.position
@@ -1394,7 +1407,8 @@ class TouchpadCursorController:
             target_y = min(max(cy + vy, self.top), self.bottom)
             self.mouse_controller.position = (target_x, target_y)
         except Exception:
-            pass
+            return False
+        return True
 
 
 class UnifiedGestureWindow(RingStreamWindowBase):
@@ -1451,6 +1465,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.right_fps_label = QLabel("右手帧率：0.0 Hz")
         self.touchpad_cursor_checkbox = QCheckBox("Touchpad 控制本地光标")
         self.touchpad_cursor_checkbox.setChecked(False)
+        self.pinch_airmouse_cursor_checkbox = QCheckBox("Pinch/Airmouse 控制本地光标")
+        self.pinch_airmouse_cursor_checkbox.setChecked(False)
 
         self.btn_subscribe = QPushButton("订阅")
         self.btn_subscribe.setProperty("class", "btn-primary")
@@ -1464,7 +1480,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.message_log.document().setMaximumBlockCount(APP_CONFIG.message_log_limit)
 
         self.recognizer_rows: dict[str, RecognizerRowWidgets] = {}
-        self.touchpad_cursor_controller = TouchpadCursorController(APP_CONFIG.touchpad.click_interval_seconds)
+        self.pinch_airmouse_move_active = False
+        self.local_cursor_controller = LocalCursorController()
         self.runtimes = self._build_runtimes()
 
         self._build_ui()
@@ -1594,14 +1611,19 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         action_row.addStretch()
         ring_layout.addLayout(action_row, 2, 0, 1, 3)
 
-        if self.touchpad_cursor_controller.available():
+        if self.local_cursor_controller.available():
             self.touchpad_cursor_checkbox.setToolTip("启用后，Touchpad 手势会驱动本地鼠标光标")
-        else:
-            self.touchpad_cursor_checkbox.setEnabled(False)
-            self.touchpad_cursor_checkbox.setToolTip(
-                f"本地光标控制不可用：{self.touchpad_cursor_controller.error or 'unknown error'}"
+            self.pinch_airmouse_cursor_checkbox.setToolTip(
+                "启用后，Pinch 启动或 pinch-up 时会将光标移动到配置点；仅在 pinch-down 到 pinch-up 期间，Airmouse 输出 move 会驱动本地鼠标光标"
             )
+        else:
+            cursor_error = self.local_cursor_controller.error or "unknown error"
+            self.touchpad_cursor_checkbox.setEnabled(False)
+            self.touchpad_cursor_checkbox.setToolTip(f"本地光标控制不可用：{cursor_error}")
+            self.pinch_airmouse_cursor_checkbox.setEnabled(False)
+            self.pinch_airmouse_cursor_checkbox.setToolTip(f"本地光标控制不可用：{cursor_error}")
         ring_layout.addWidget(self.touchpad_cursor_checkbox, 3, 0, 1, 3)
+        ring_layout.addWidget(self.pinch_airmouse_cursor_checkbox, 4, 0, 1, 3)
         root.addWidget(ring_panel)
 
         recognizer_panel = QFrame()
@@ -1660,6 +1682,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.left_combo.currentIndexChanged.connect(self.refresh_target_labels)
         self.right_combo.currentIndexChanged.connect(self.refresh_target_labels)
         self.touchpad_cursor_checkbox.toggled.connect(self.on_touchpad_cursor_toggled)
+        self.pinch_airmouse_cursor_checkbox.toggled.connect(self.on_pinch_airmouse_cursor_toggled)
 
     def on_connected_changed(self, connected: bool) -> None:
         self.stream_connected = connected
@@ -1798,9 +1821,11 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             else:
                 runtime.deactivate()
 
+        self._sync_pinch_airmouse_cursor_control(reset_home=True)
         self.refresh_target_labels()
 
     def stop_all_recognizers(self) -> None:
+        self.pinch_airmouse_move_active = False
         for runtime in self.runtimes.values():
             runtime.deactivate()
         self.publish_runtime_status()
@@ -1814,6 +1839,10 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         event_ts: float,
     ) -> None:
         _ = ring
+        if recognizer == RECOGNIZER_PINCH:
+            self._handle_pinch_airmouse_event(event_name)
+        if recognizer == RECOGNIZER_AIRMOUSE and event_name == "move":
+            self._apply_airmouse_cursor_move(data)
         if event_name == "move":
             return
         self.sequence += 1
@@ -1938,11 +1967,68 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         touchpad_runtime = self.runtimes.get(RECOGNIZER_TOUCHPAD)
         if isinstance(touchpad_runtime, ThreadedMotionRuntime):
             touchpad_runtime.set_cursor_control_enabled(checked)
-        if checked and not self.touchpad_cursor_controller.available():
+        if checked and not self.local_cursor_controller.available():
             self.subscription_status_label.setText(
-                f"Touchpad 光标控制不可用：{self.touchpad_cursor_controller.error or 'unknown error'}"
+                f"Touchpad 光标控制不可用：{self.local_cursor_controller.error or 'unknown error'}"
             )
         self.publish_runtime_status()
+
+    def on_pinch_airmouse_cursor_toggled(self, checked: bool) -> None:
+        if checked and not self.local_cursor_controller.available():
+            self.subscription_status_label.setText(
+                f"Pinch/Airmouse 光标控制不可用：{self.local_cursor_controller.error or 'unknown error'}"
+            )
+        elif checked:
+            self._sync_pinch_airmouse_cursor_control(reset_home=True)
+        else:
+            self.pinch_airmouse_move_active = False
+        self.publish_runtime_status()
+
+    def _pinch_airmouse_cursor_enabled(self) -> bool:
+        return self.pinch_airmouse_cursor_checkbox.isChecked() and self.local_cursor_controller.available()
+
+    def _recognizer_requested(self, recognizer: str) -> bool:
+        runtime = self.runtimes.get(recognizer)
+        return runtime is not None and runtime.requested and runtime.target is not None
+
+    def _reset_pinch_airmouse_cursor(self) -> None:
+        if not self._pinch_airmouse_cursor_enabled():
+            return
+        self.local_cursor_controller.move_to_home_ratio(
+            APP_CONFIG.airmouse.cursor_home_x_ratio,
+            APP_CONFIG.airmouse.cursor_home_y_ratio,
+        )
+
+    def _sync_pinch_airmouse_cursor_control(self, *, reset_home: bool = False) -> None:
+        self.pinch_airmouse_move_active = False
+        if not self._pinch_airmouse_cursor_enabled():
+            return
+        if reset_home and self._recognizer_requested(RECOGNIZER_PINCH):
+            self._reset_pinch_airmouse_cursor()
+
+    def _handle_pinch_airmouse_event(self, event_name: str) -> None:
+        if event_name == "pinch-down":
+            self.pinch_airmouse_move_active = (
+                self._pinch_airmouse_cursor_enabled()
+                and self._recognizer_requested(RECOGNIZER_PINCH)
+                and self._recognizer_requested(RECOGNIZER_AIRMOUSE)
+            )
+            return
+        if event_name == "pinch-up":
+            self.pinch_airmouse_move_active = False
+            self._reset_pinch_airmouse_cursor()
+
+    def _apply_airmouse_cursor_move(self, data: dict[str, Any]) -> None:
+        if not self._pinch_airmouse_cursor_enabled():
+            return
+        if not self._recognizer_requested(RECOGNIZER_AIRMOUSE):
+            return
+        if not self.pinch_airmouse_move_active:
+            return
+
+        vx = float(data.get("move_x", 0.0) or 0.0)
+        vy = float(data.get("move_y", 0.0) or 0.0)
+        self.local_cursor_controller.move_by(vx, vy)
 
     def current_streams(self) -> list[str]:
         streams = ["imu"]
