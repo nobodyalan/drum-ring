@@ -704,12 +704,19 @@ class GestureInferenceWorker(QThread):
                 window = deque(maxlen=self.cfg.window_size)
                 self._reading_windows[address] = window
             batch: list[tuple[np.ndarray, float]] = []
+            latest_window: tuple[np.ndarray, float] | None = None
             for _ in range(take_count):
                 reading = pending.popleft()
                 window.append(reading.data)
                 if len(window) < self.cfg.window_size:
                     continue
-                batch.append((np.asarray(window, dtype=np.float32).T, reading.event_ts))
+                snapshot = (np.asarray(window, dtype=np.float32).T, reading.event_ts)
+                if self._mode == self.MODE_TARGET:
+                    latest_window = snapshot
+                else:
+                    batch.append(snapshot)
+            if self._mode == self.MODE_TARGET and latest_window is not None:
+                batch.append(latest_window)
             if not pending:
                 self._pending_readings.pop(address, None)
             if batch:

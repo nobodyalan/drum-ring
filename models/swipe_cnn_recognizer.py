@@ -13,6 +13,16 @@ try:
 except ModuleNotFoundError:
     yaml = None
 
+try:
+    from openvino import Core
+
+    HAS_OPENVINO_RUNTIME = True
+    OPENVINO_RUNTIME_ERROR = ""
+except Exception as exc:
+    Core = None
+    HAS_OPENVINO_RUNTIME = False
+    OPENVINO_RUNTIME_ERROR = str(exc)
+
 
 CONFIG_FILENAME = "config.yaml"
 CHECKPOINT_FILENAME = "swipe_cnn_classification_best.pt"
@@ -40,6 +50,50 @@ class SwipePrediction:
     label: str
     confidence: float
     probabilities: tuple[float, ...]
+
+
+def resolve_openvino_model_path(model_path: str | Path) -> Path:
+    path = Path(model_path).resolve()
+    if path.is_file():
+        if path.suffix.lower() != ".xml":
+            raise ValueError(f"OpenVINO 模型文件必须是 .xml，收到: {path}")
+        return path
+    if not path.is_dir():
+        raise FileNotFoundError(f"未找到 OpenVINO 模型路径: {path}")
+
+    preferred = path / f"{path.name}.xml"
+    if preferred.exists():
+        return preferred
+
+    candidates = sorted(path.glob("*.xml"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError(f"目录中未找到 OpenVINO xml 模型: {path}")
+    raise RuntimeError(f"目录中存在多个 OpenVINO xml 模型，请显式指定文件路径: {path}")
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - np.max(logits, axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / np.sum(exp, axis=-1, keepdims=True)
+
+
+def _partial_shape_to_dims(partial_shape) -> list[int | None] | None:
+    rank = getattr(partial_shape, "rank", None)
+    if rank is not None and getattr(rank, "is_dynamic", False):
+        return None
+
+    dims: list[int | None] = []
+    for dim in partial_shape:
+        if getattr(dim, "is_dynamic", False):
+            dims.append(None)
+            continue
+        if hasattr(dim, "get_length"):
+            dims.append(int(dim.get_length()))
+            continue
+        dims.append(int(dim))
+    return dims
 
 
 def load_swipe_config(config_path: str | Path) -> dict[str, float]:
@@ -83,8 +137,21 @@ def load_swipe_config(config_path: str | Path) -> dict[str, float]:
 
 
 class SwipeCNNRecognizer:
-    def __init__(self, checkpoint_dir: str | Path, device: str = "cpu"):
+    def __init__(self, checkpoint_dir: str | Path, device: str = "cpu", backend: str = "pytorch"):
+        self.backend = str(backend).strip().lower()
         self.checkpoint_dir = Path(checkpoint_dir).resolve()
+        self.model_source = self.checkpoint_dir
+        self.window_size: int | None = None
+
+        if self.backend == "pytorch":
+            self._init_pytorch(device)
+            return
+        if self.backend == "openvino":
+            self._init_openvino(device)
+            return
+        raise ValueError(f"不支持的后端: {backend}")
+
+    def _init_pytorch(self, device: str) -> None:
         self.device = torch.device(device)
         if self.device.type != "cpu":
             raise ValueError(f"该识别器仅允许 CPU 推理，收到: {self.device}")
@@ -109,6 +176,36 @@ class SwipeCNNRecognizer:
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
+        self.model_source = self.checkpoint_dir / CHECKPOINT_FILENAME
+
+    def _init_openvino(self, device: str) -> None:
+        if not HAS_OPENVINO_RUNTIME or Core is None:
+            raise RuntimeError(f"OpenVINO 不可用: {OPENVINO_RUNTIME_ERROR}")
+
+        model_path = resolve_openvino_model_path(self.checkpoint_dir)
+        config_path = model_path.parent / CONFIG_FILENAME
+        if not config_path.exists():
+            raise FileNotFoundError(f"OpenVINO 模型目录缺少配置文件: {config_path}")
+
+        self.ov_device = str(device).upper()
+        self.model_source = model_path
+        self.input_dim = int(load_swipe_config(config_path)["input_dim"])
+
+        core = Core()
+        self.compiled_model = core.compile_model(model=str(model_path), device_name=self.ov_device)
+        self.input_layer = self.compiled_model.input(0)
+        self.output_layer = self.compiled_model.output(0)
+
+        input_shape = _partial_shape_to_dims(self.input_layer.partial_shape)
+        if input_shape is None or len(input_shape) != 3:
+            raise ValueError(f"OpenVINO 输入形状异常: {input_shape}")
+        self.window_size = None if input_shape[1] is None else int(input_shape[1])
+
+        output_shape = _partial_shape_to_dims(self.output_layer.partial_shape)
+        if output_shape is None or len(output_shape) < 2 or output_shape[-1] is None:
+            raise ValueError(f"OpenVINO 输出形状异常: {output_shape}")
+        output_dim = int(output_shape[-1])
+        self.class_ids = SWIPE_CLASS_ID_SETS.get(output_dim, tuple(range(output_dim)))
 
     def prepare(self, imu_values: np.ndarray) -> np.ndarray:
         values = np.asarray(imu_values, dtype=np.float32)
@@ -116,6 +213,8 @@ class SwipeCNNRecognizer:
             raise ValueError(f"IMU 数据形状必须为 (N, {self.input_dim})，收到: {values.shape}")
         if values.shape[0] <= 0:
             raise ValueError("IMU 数据为空，无法推理")
+        if self.window_size is not None and values.shape[0] != self.window_size:
+            raise ValueError(f"OpenVINO 模型要求窗口长度为 {self.window_size}，收到: {values.shape[0]}")
 
         values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
         values = (values - SWIPE_ZSCORE_MEAN) / SWIPE_ZSCORE_STD
@@ -124,9 +223,13 @@ class SwipeCNNRecognizer:
     @torch.inference_mode()
     def predict(self, imu_values: np.ndarray) -> SwipePrediction:
         prepared = self.prepare(imu_values)
-        inputs = torch.from_numpy(prepared).unsqueeze(0).to(self.device)
-        logits = self.model(inputs)
-        probs = torch.softmax(logits[0], dim=0).cpu().numpy().astype(np.float32, copy=False)
+        if self.backend == "pytorch":
+            inputs = torch.from_numpy(prepared).unsqueeze(0).to(self.device)
+            logits = self.model(inputs)
+            probs = torch.softmax(logits[0], dim=0).cpu().numpy().astype(np.float32, copy=False)
+        else:
+            logits = self.compiled_model({self.input_layer: prepared[None, ...]})[self.output_layer]
+            probs = _softmax(np.asarray(logits, dtype=np.float32).reshape(1, -1))[0].astype(np.float32, copy=False)
         top_index = int(np.argmax(probs))
         class_id = int(self.class_ids[top_index])
         return SwipePrediction(

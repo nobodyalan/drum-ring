@@ -138,6 +138,7 @@ IMU_SAMPLE_RATE_HZ = 200.0
 @dataclass(frozen=True)
 class WindowClassifierConfig:
     checkpoint_dir: Path
+    backend: str
     window_size: int
     step_frames: int
     stable_window_seconds: float
@@ -156,6 +157,7 @@ class SnapRecognizerConfig:
     models_allowed_gestures: tuple[tuple[int, ...], ...]
     device: str
     merge_window_seconds: float
+    target_fps: float = 50.0
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ APP_CONFIG = UnifiedAppConfig(
     status_broadcast_interval_seconds=1.0,
     swipe=WindowClassifierConfig(
         checkpoint_dir=APP_ROOT / "checkpoint" / "swipe" / "cls",
+        backend="openvino",
         window_size=60,
         step_frames=2,
         stable_window_seconds=0.05,
@@ -213,6 +216,7 @@ APP_CONFIG = UnifiedAppConfig(
     ),
     pinch=WindowClassifierConfig(
         checkpoint_dir=APP_ROOT / "checkpoint" / "swipe" / "cls-pinch",
+        backend="openvino",
         window_size=60,
         step_frames=2,
         stable_window_seconds=0.05,
@@ -229,6 +233,7 @@ APP_CONFIG = UnifiedAppConfig(
         models_allowed_gestures=((16,),),
         device="CPU",
         merge_window_seconds=0.5,
+        target_fps=50.0,
     ),
     touchpad=TouchpadRecognizerConfig(
         gesture_ckpt=APP_ROOT / "checkpoint" / "tap-94.pth",
@@ -1060,6 +1065,7 @@ class WindowClassifierRuntime(RecognizerRuntimeBase):
 class SnapRuntime(RecognizerRuntimeBase):
     def __init__(self, bus: RecognizerBus, config: SnapRecognizerConfig):
         super().__init__(RECOGNIZER_SNAP, bus, ring_role="right")
+        self.config = config
         self.current_infer_fps = 0.0
         self.worker = GestureInferenceWorker(
             GestureConfig(
@@ -1086,8 +1092,15 @@ class SnapRuntime(RecognizerRuntimeBase):
         if self.worker_error:
             self._set_status(f"模型失败: {self.worker_error}")
             return
+        self.worker.set_processing_mode(
+            GestureInferenceWorker.MODE_TARGET,
+            self.config.target_fps,
+        )
         self.worker.clear_stream_state(None)
-        self._set_status("等待窗口积累" if self.worker_ready else "模型加载中")
+        if self.worker_ready:
+            self._set_status(f"等待窗口积累（限速 {self.config.target_fps:.0f} FPS）")
+        else:
+            self._set_status("模型加载中")
 
     def on_deactivate(self) -> None:
         self.current_infer_fps = 0.0
@@ -1118,7 +1131,11 @@ class SnapRuntime(RecognizerRuntimeBase):
             if error_message:
                 self._set_status(f"模型失败: {error_message}")
             elif ready:
-                self._set_status("模型已就绪")
+                self.worker.set_processing_mode(
+                    GestureInferenceWorker.MODE_TARGET,
+                    self.config.target_fps,
+                )
+                self._set_status(f"模型已就绪（限速 {self.config.target_fps:.0f} FPS）")
 
     def _on_result(self, address: str, _state_payload: dict[str, Any], code: int) -> None:
         if not self.requested or self.target is None or address != self.target.address:
@@ -1427,7 +1444,11 @@ class UnifiedGestureWindow(RingStreamWindowBase):
                 RECOGNIZER_SWIPE,
                 self.bus,
                 APP_CONFIG.swipe,
-                lambda: SwipeCNNRecognizer(APP_CONFIG.swipe.checkpoint_dir, device="cpu"),
+                lambda: SwipeCNNRecognizer(
+                    APP_CONFIG.swipe.checkpoint_dir,
+                    device="cpu",
+                    backend=APP_CONFIG.swipe.backend,
+                ),
                 {
                     1: "swipe-up",
                     2: "swipe-down",
@@ -1440,7 +1461,11 @@ class UnifiedGestureWindow(RingStreamWindowBase):
                 RECOGNIZER_PINCH,
                 self.bus,
                 APP_CONFIG.pinch,
-                lambda: PinchCNNRecognizer(APP_CONFIG.pinch.checkpoint_dir, device="cpu"),
+                lambda: PinchCNNRecognizer(
+                    APP_CONFIG.pinch.checkpoint_dir,
+                    device="cpu",
+                    backend=APP_CONFIG.pinch.backend,
+                ),
                 {
                     1: "pinch-down",
                     2: "pinch-up",

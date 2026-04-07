@@ -14,7 +14,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 import numpy as np
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
@@ -77,6 +77,30 @@ PINCH_CLASS_COLORS = {
 PINCH_CLASS_TO_KEY = {}
 
 
+class RateTracker:
+    def __init__(self, window_seconds: float = 1.0):
+        self.window_seconds = max(0.1, float(window_seconds))
+        self._timestamps: deque[float] = deque()
+
+    def reset(self) -> None:
+        self._timestamps.clear()
+
+    def mark(self, timestamp: float | None = None) -> None:
+        now = time.perf_counter() if timestamp is None else float(timestamp)
+        self._timestamps.append(now)
+        self._trim(now)
+
+    def fps(self) -> float:
+        now = time.perf_counter()
+        self._trim(now)
+        return len(self._timestamps) / self.window_seconds
+
+    def _trim(self, now: float) -> None:
+        threshold = now - self.window_seconds
+        while self._timestamps and self._timestamps[0] < threshold:
+            self._timestamps.popleft()
+
+
 @dataclass
 class RingBufferState:
     ring_name: str
@@ -85,6 +109,7 @@ class RingBufferState:
     prediction_history: deque[int] = field(default_factory=deque)
     committed_counts: Counter[int] = field(default_factory=Counter)
     reset_after_frames_remaining: int = 0
+    rate_tracker: RateTracker = field(default_factory=RateTracker)
 
 
 @dataclass(frozen=True)
@@ -206,9 +231,10 @@ class PinchInferenceWorker(QThread):
     job_failed = pyqtSignal(object)
     fatal_error = pyqtSignal(str)
 
-    def __init__(self, checkpoint_dir: Path):
+    def __init__(self, checkpoint_dir: Path, *, backend: str):
         super().__init__()
         self.checkpoint_dir = Path(checkpoint_dir)
+        self.backend = str(backend)
         self._jobs: queue.Queue[InferenceJob | None] = queue.Queue(maxsize=1)
         self._stopping = False
 
@@ -232,7 +258,7 @@ class PinchInferenceWorker(QThread):
 
     def run(self) -> None:
         try:
-            recognizer = PinchCNNRecognizer(self.checkpoint_dir, device="cpu")
+            recognizer = PinchCNNRecognizer(self.checkpoint_dir, device="cpu", backend=self.backend)
         except Exception as exc:
             self.fatal_error.emit(f"模型加载失败：{exc}")
             return
@@ -263,19 +289,24 @@ class PinchInferenceWorker(QThread):
 
 
 class PinchRealtimeWindow(RingStreamWindowBase):
-    DEFAULT_WINDOW_SIZE = 120
-    DEFAULT_STEP_FRAMES = 5
-    DEFAULT_STABLE_WINDOW_SECONDS = 0.15
-    DEFAULT_P_RATIO = 0.80
-    DEFAULT_RESET_DELAY_FRAMES = 20
+    DEFAULT_WINDOW_SIZE = 60
+    DEFAULT_STEP_FRAMES = 2
+    DEFAULT_STABLE_WINDOW_SECONDS = 0.05
+    DEFAULT_P_RATIO = 1
+    DEFAULT_RESET_DELAY_FRAMES = 2
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, *, backend: str = "pytorch", model_path: Path | None = None):
         super().__init__(host=host, port=port)
         self.setWindowTitle("Pinch 实时检测")
         self.resize(1200, 800)
 
+        self.backend = str(backend).strip().lower()
+        self.model_source = self.resolve_model_source(model_path)
+        self.backend_display_name = "OpenVINO" if self.backend == "openvino" else "PyTorch"
+        self.model_source_label = self.display_path(self.model_source)
         self.states: dict[str, RingBufferState] = {}
         self.active_address = ""
+        self.active_result_address = ""
         self.runtime_ready = False
         self.runtime_failed = not HAS_PINCH_RUNTIME
         self.worker_busy = False
@@ -285,9 +316,12 @@ class PinchRealtimeWindow(RingStreamWindowBase):
         self.stream_status_label.setObjectName("statusTag")
         self.workflow_label = QLabel("状态：准备启动")
         self.workflow_label.setWordWrap(True)
-        self.device_label = QLabel("推理设备：CPU | 模型：checkpoint/swipe/cls-pinch | 加载中")
+        self.device_label = QLabel(
+            f"推理后端：{self.backend_display_name} | 模型：{self.model_source_label} | 加载中"
+        )
         self.active_ring_label = QLabel("当前显示：无")
         self.buffer_label = QLabel("缓冲区：0 / 100 帧")
+        self.fps_label = QLabel("结果帧率：0.0 Hz")
         self.result_label = QLabel("--")
         self.result_label.setProperty("class", "title")
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -341,17 +375,21 @@ class PinchRealtimeWindow(RingStreamWindowBase):
         self._build_ui()
         self.set_stream_status_label(self.stream_status_label)
         self._bind_signals()
+        self.fps_timer = QTimer(self)
+        self.fps_timer.setInterval(1000)
+        self.fps_timer.timeout.connect(self.refresh_fps)
+        self.fps_timer.start()
 
         self.worker: PinchInferenceWorker | None = None
         if HAS_PINCH_RUNTIME:
-            self.worker = PinchInferenceWorker(CHECKPOINT_DIR)
+            self.worker = PinchInferenceWorker(self.model_source, backend=self.backend)
             self.worker.ready.connect(self.on_worker_ready)
             self.worker.result_ready.connect(self.on_inference_result)
             self.worker.job_failed.connect(self.on_inference_failed)
             self.worker.fatal_error.connect(self.on_worker_fatal_error)
             self.worker.start()
         else:
-            self.device_label.setText("推理设备：CPU | 模型：不可用")
+            self.device_label.setText(f"推理后端：{self.backend_display_name} | 模型：不可用")
             self.set_runtime_status(f"状态：推理依赖不可用（{PINCH_RUNTIME_ERROR}）")
 
         self.client.start()
@@ -384,6 +422,7 @@ class PinchRealtimeWindow(RingStreamWindowBase):
         control_layout.addWidget(self.device_label)
         control_layout.addWidget(self.active_ring_label)
         control_layout.addWidget(self.buffer_label)
+        control_layout.addWidget(self.fps_label)
 
         self.add_ring_selection_panel(
             control_layout,
@@ -451,6 +490,17 @@ class PinchRealtimeWindow(RingStreamWindowBase):
         _ = rings
         for address in removed_addresses:
             self.states.pop(address, None)
+            was_active = self.active_address == address
+            was_active_result = self.active_result_address == address
+            if was_active:
+                self.active_address = ""
+                self.active_ring_label.setText("当前显示：无")
+                self.buffer_label.setText(f"缓冲区：0 / {self.window_size_input.value()} 帧")
+            if was_active_result:
+                self.active_result_address = ""
+                self.fps_label.setText("结果帧率：0.0 Hz")
+            if was_active or was_active_result:
+                self.update_count_views(Counter())
 
         for address in changed_connection_addresses:
             ring = self.ring_info.get(address)
@@ -458,10 +508,16 @@ class PinchRealtimeWindow(RingStreamWindowBase):
             if connected:
                 continue
             self.states.pop(address, None)
-            if self.active_address == address:
+            was_active = self.active_address == address
+            was_active_result = self.active_result_address == address
+            if was_active:
                 self.active_address = ""
                 self.active_ring_label.setText("当前显示：无")
                 self.buffer_label.setText(f"缓冲区：0 / {self.window_size_input.value()} 帧")
+            if was_active_result:
+                self.active_result_address = ""
+                self.fps_label.setText("结果帧率：0.0 Hz")
+            if was_active or was_active_result:
                 self.update_count_views(Counter())
 
     def handle_stream_message(self, message: dict) -> None:
@@ -532,19 +588,25 @@ class PinchRealtimeWindow(RingStreamWindowBase):
 
     def on_worker_ready(self) -> None:
         self.runtime_ready = True
-        self.device_label.setText("推理设备：CPU | 模型：checkpoint/swipe/cls-pinch | 已就绪")
+        self.device_label.setText(
+            f"推理后端：{self.backend_display_name} | 模型：{self.model_source_label} | 已就绪"
+        )
         self.set_runtime_status("状态：模型已就绪，等待 IMU 数据")
 
     def on_worker_fatal_error(self, message: str) -> None:
         self.runtime_failed = True
         self.runtime_ready = False
         self.worker_busy = False
-        self.device_label.setText("推理设备：CPU | 模型：加载失败")
+        self.device_label.setText(
+            f"推理后端：{self.backend_display_name} | 模型：{self.model_source_label} | 加载失败"
+        )
         self.set_runtime_status(f"状态：{message}")
 
     def on_inference_result(self, result: InferenceResult) -> None:
         self.worker_busy = False
         state = self.state_for(result.address)
+        self.active_result_address = result.address
+        state.rate_tracker.mark()
         self.chart.set_probabilities(result.prediction.probabilities)
         self.result_label.setText(f"{result.prediction.class_id} · {result.prediction.label}")
         decision = self.update_gesture_state(result.address, state, result.prediction.class_id)
@@ -579,6 +641,7 @@ class PinchRealtimeWindow(RingStreamWindowBase):
     def clear_results(self) -> None:
         self.states.clear()
         self.active_address = ""
+        self.active_result_address = ""
         self.worker_busy = False
         self.chart.clear()
         self.result_label.setText("--")
@@ -586,10 +649,21 @@ class PinchRealtimeWindow(RingStreamWindowBase):
         self.count_label.setText("累计计数：1=0 2=0")
         self.active_ring_label.setText("当前显示：无")
         self.buffer_label.setText(f"缓冲区：0 / {self.window_size_input.value()} 帧")
+        self.fps_label.setText("结果帧率：0.0 Hz")
         self.set_runtime_status("状态：结果已清空，等待 IMU 数据")
 
     def set_runtime_status(self, text: str) -> None:
         self.workflow_label.setText(text)
+
+    def refresh_fps(self) -> None:
+        if not self.active_result_address:
+            self.fps_label.setText("结果帧率：0.0 Hz")
+            return
+        state = self.states.get(self.active_result_address)
+        if state is None:
+            self.fps_label.setText("结果帧率：0.0 Hz")
+            return
+        self.fps_label.setText(f"结果帧率：{state.rate_tracker.fps():.1f} Hz")
 
     def state_for(self, address: str) -> RingBufferState:
         state = self.states.get(address)
@@ -705,6 +779,18 @@ class PinchRealtimeWindow(RingStreamWindowBase):
             return address[-8:]
         return "Unknown"
 
+    def resolve_model_source(self, model_path: Path | None) -> Path:
+        source = CHECKPOINT_DIR if model_path is None else Path(model_path).expanduser().resolve()
+        if self.backend == "pytorch" and source.is_file():
+            return source.parent
+        return source
+
+    def display_path(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(APP_ROOT))
+        except ValueError:
+            return str(path.resolve())
+
     def closeEvent(self, event) -> None:
         if self.worker is not None:
             self.worker.stop()
@@ -717,6 +803,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=17888)
+    parser.add_argument("--backend", choices=("pytorch", "openvino"), default="pytorch")
+    parser.add_argument("--model-path", type=Path)
     return parser.parse_args()
 
 
@@ -724,6 +812,6 @@ if __name__ == "__main__":
     args = parse_args()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE_SHEET)
-    win = PinchRealtimeWindow(host=args.host, port=args.port)
+    win = PinchRealtimeWindow(host=args.host, port=args.port, backend=args.backend, model_path=args.model_path)
     win.show()
     raise SystemExit(app.exec())

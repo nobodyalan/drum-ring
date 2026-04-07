@@ -220,9 +220,10 @@ class SwipeInferenceWorker(QThread):
     job_failed = pyqtSignal(object)
     fatal_error = pyqtSignal(str)
 
-    def __init__(self, checkpoint_dir: Path):
+    def __init__(self, checkpoint_dir: Path, *, backend: str):
         super().__init__()
         self.checkpoint_dir = Path(checkpoint_dir)
+        self.backend = str(backend)
         self._jobs: queue.Queue[InferenceJob | None] = queue.Queue(maxsize=1)
         self._stopping = False
 
@@ -250,7 +251,7 @@ class SwipeInferenceWorker(QThread):
             return
 
         try:
-            recognizer = SwipeCNNRecognizer(self.checkpoint_dir, device="cpu")
+            recognizer = SwipeCNNRecognizer(self.checkpoint_dir, device="cpu", backend=self.backend)
         except Exception as exc:
             self.fatal_error.emit(f"模型加载失败: {exc}")
             print(f"SwipeCNNRecognizer 初始化失败: {exc}")
@@ -282,17 +283,21 @@ class SwipeInferenceWorker(QThread):
 
 
 class SwipeRealtimeWindow(RingStreamWindowBase):
-    DEFAULT_WINDOW_SIZE = 120
+    DEFAULT_WINDOW_SIZE = 60
     DEFAULT_STEP_FRAMES = 5
-    DEFAULT_STABLE_WINDOW_SECONDS = 0.15
-    DEFAULT_P_RATIO = 0.80
-    DEFAULT_RESET_DELAY_FRAMES = 20
+    DEFAULT_STABLE_WINDOW_SECONDS = 0.10
+    DEFAULT_P_RATIO = 1
+    DEFAULT_RESET_DELAY_FRAMES = 10
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, *, backend: str = "pytorch", model_path: Path | None = None):
         super().__init__(host=host, port=port)
         self.setWindowTitle("Swipe 实时检测")
         self.resize(1200, 800)
 
+        self.backend = str(backend).strip().lower()
+        self.model_source = self.resolve_model_source(model_path)
+        self.backend_display_name = "OpenVINO" if self.backend == "openvino" else "PyTorch"
+        self.model_source_label = self.display_path(self.model_source)
         self.states: dict[str, RingBufferState] = {}
         self.active_address = ""
         self.runtime_ready = False
@@ -304,7 +309,9 @@ class SwipeRealtimeWindow(RingStreamWindowBase):
         self.stream_status_label.setObjectName("statusTag")
         self.workflow_label = QLabel("状态：准备启动")
         self.workflow_label.setWordWrap(True)
-        self.device_label = QLabel("推理设备：CPU | 模型：checkpoint/swipe/cls | 加载中")
+        self.device_label = QLabel(
+            f"推理后端：{self.backend_display_name} | 模型：{self.model_source_label} | 加载中"
+        )
         self.active_ring_label = QLabel("当前显示：无")
         self.buffer_label = QLabel("缓冲区：0 / 100 帧")
         self.result_label = QLabel("--")
@@ -363,14 +370,14 @@ class SwipeRealtimeWindow(RingStreamWindowBase):
 
         self.worker: SwipeInferenceWorker | None = None
         if HAS_SWIPE_RUNTIME:
-            self.worker = SwipeInferenceWorker(CHECKPOINT_DIR)
+            self.worker = SwipeInferenceWorker(self.model_source, backend=self.backend)
             self.worker.ready.connect(self.on_worker_ready)
             self.worker.result_ready.connect(self.on_inference_result)
             self.worker.job_failed.connect(self.on_inference_failed)
             self.worker.fatal_error.connect(self.on_worker_fatal_error)
             self.worker.start()
         else:
-            self.device_label.setText("推理设备：CPU | 模型：不可用")
+            self.device_label.setText(f"推理后端：{self.backend_display_name} | 模型：不可用")
             self.set_runtime_status(f"状态：推理依赖不可用（{SWIPE_RUNTIME_ERROR}）")
 
         self.client.start()
@@ -551,14 +558,18 @@ class SwipeRealtimeWindow(RingStreamWindowBase):
 
     def on_worker_ready(self) -> None:
         self.runtime_ready = True
-        self.device_label.setText("推理设备：CPU | 模型：checkpoint/swipe/cls | 已就绪")
+        self.device_label.setText(
+            f"推理后端：{self.backend_display_name} | 模型：{self.model_source_label} | 已就绪"
+        )
         self.set_runtime_status("状态：模型已就绪，等待 IMU 数据")
 
     def on_worker_fatal_error(self, message: str) -> None:
         self.runtime_failed = True
         self.runtime_ready = False
         self.worker_busy = False
-        self.device_label.setText("推理设备：CPU | 模型：加载失败")
+        self.device_label.setText(
+            f"推理后端：{self.backend_display_name} | 模型：{self.model_source_label} | 加载失败"
+        )
         self.set_runtime_status(f"状态：{message}")
 
     def on_inference_result(self, result: InferenceResult) -> None:
@@ -723,6 +734,18 @@ class SwipeRealtimeWindow(RingStreamWindowBase):
             return address[-8:]
         return "Unknown"
 
+    def resolve_model_source(self, model_path: Path | None) -> Path:
+        source = CHECKPOINT_DIR if model_path is None else Path(model_path).expanduser().resolve()
+        if self.backend == "pytorch" and source.is_file():
+            return source.parent
+        return source
+
+    def display_path(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(APP_ROOT))
+        except ValueError:
+            return str(path.resolve())
+
     def closeEvent(self, event) -> None:
         if self.worker is not None:
             self.worker.stop()
@@ -735,6 +758,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=17888)
+    parser.add_argument("--backend", choices=("pytorch", "openvino"), default="pytorch")
+    parser.add_argument("--model-path", type=Path)
     return parser.parse_args()
 
 
@@ -742,6 +767,6 @@ if __name__ == "__main__":
     args = parse_args()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE_SHEET)
-    win = SwipeRealtimeWindow(host=args.host, port=args.port)
+    win = SwipeRealtimeWindow(host=args.host, port=args.port, backend=args.backend, model_path=args.model_path)
     win.show()
     raise SystemExit(app.exec())
