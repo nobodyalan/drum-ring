@@ -600,49 +600,56 @@ class MainWindow(QMainWindow):
         )
         apps_row.addWidget(btn_touchpad, 0, 6)
 
+        btn_unified_gesture = QPushButton("综合识别")
+        btn_unified_gesture.setProperty("class", "btn-primary")
+        btn_unified_gesture.clicked.connect(
+            lambda: self.launch_app("apps/unified_gesture_app.py", "综合识别")
+        )
+        apps_row.addWidget(btn_unified_gesture, 0, 7)
+
         btn_whisper_number = QPushButton("数字书写识别")
         btn_whisper_number.setProperty("class", "btn-primary")
         btn_whisper_number.clicked.connect(
             lambda: self.launch_app("apps/whisper_number_touch_app.py", "数字书写识别")
         )
-        apps_row.addWidget(btn_whisper_number, 0, 7)
+        apps_row.addWidget(btn_whisper_number, 0, 8)
 
         btn_whisper_word = QPushButton("英文小写识别")
         btn_whisper_word.setProperty("class", "btn-primary")
         btn_whisper_word.clicked.connect(
             lambda: self.launch_app("apps/whisper_word_touch_app.py", "英文小写识别")
         )
-        apps_row.addWidget(btn_whisper_word, 0, 8)
+        apps_row.addWidget(btn_whisper_word, 0, 9)
 
         btn_swipe = QPushButton("Swipe 检测")
         btn_swipe.setProperty("class", "btn-primary")
         btn_swipe.clicked.connect(
             lambda: self.launch_app("apps/swipe_realtime_app.py", "Swipe 检测")
         )
-        apps_row.addWidget(btn_swipe, 0, 9)
+        apps_row.addWidget(btn_swipe, 0, 10)
 
         btn_pinch = QPushButton("Pinch 检测")
         btn_pinch.setProperty("class", "btn-primary")
         btn_pinch.clicked.connect(
             lambda: self.launch_app("apps/pinch_realtime_app.py", "Pinch 检测")
         )
-        apps_row.addWidget(btn_pinch, 0, 10)
+        apps_row.addWidget(btn_pinch, 0, 11)
 
         btn_snake = QPushButton("Snake")
         btn_snake.setProperty("class", "btn-primary")
         btn_snake.clicked.connect(
             lambda: self.launch_app("apps/snake_app.py", "Snake")
         )
-        apps_row.addWidget(btn_snake, 0, 11)
-        apps_row.setColumnStretch(12, 1)
+        apps_row.addWidget(btn_snake, 0, 12)
+        apps_row.setColumnStretch(13, 1)
 
         btn_typering = QPushButton("戒指打字")
         btn_typering.setProperty("class", "btn-primary")
         btn_typering.clicked.connect(
             lambda: self.launch_app("apps/typering_app.py", "戒指打字")
         )
-        apps_row.addWidget(btn_typering, 0, 12)
-        apps_row.setColumnStretch(13, 1)
+        apps_row.addWidget(btn_typering, 0, 13)
+        apps_row.setColumnStretch(14, 1)
         apps_panel.setLayout(apps_row)
         main_layout.addWidget(apps_panel)
 
