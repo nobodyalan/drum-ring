@@ -53,10 +53,14 @@ try:
         RingTarget,
         RingStatus,
         RuntimeStatusMessage,
+        VOICE_STATE_FINISHED,
+        VOICE_STATE_LISTENING,
+        VoiceStatusMessage,
         build_ack_message,
         build_error_message,
         build_recognizer_event,
         build_runtime_status,
+        build_voice_status,
         parse_control_command,
     )
 except ModuleNotFoundError:
@@ -78,10 +82,14 @@ except ModuleNotFoundError:
         RingTarget,
         RingStatus,
         RuntimeStatusMessage,
+        VOICE_STATE_FINISHED,
+        VOICE_STATE_LISTENING,
+        VoiceStatusMessage,
         build_ack_message,
         build_error_message,
         build_recognizer_event,
         build_runtime_status,
+        build_voice_status,
         parse_control_command,
     )
 
@@ -310,6 +318,20 @@ class RecognizerRowWidgets:
     target_label: QLabel
     fps_label: QLabel
     status_label: QLabel
+
+
+@dataclass
+class VoiceCaptureState:
+    active: bool = False
+    started_at: float = 0.0
+    audio_messages: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class VoiceCaptureResult:
+    started_at: float
+    finished_at: float
+    audio_message_count: int
 
 
 class RateTracker:
@@ -1311,9 +1333,11 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
     def __init__(self, bus: RecognizerBus):
         super().__init__(RECOGNIZER_AUDIO, bus, ring_role="right")
         self.rate_tracker = RateTracker()
+        self.capture_state = VoiceCaptureState()
 
     def on_activate(self) -> None:
         self.rate_tracker.reset()
+        self._reset_voice_capture()
         if self.target is None:
             self._set_status(self.missing_target_text())
             return
@@ -1321,6 +1345,7 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
 
     def on_deactivate(self) -> None:
         self.rate_tracker.reset()
+        self._reset_voice_capture()
 
     def handle_audio(self, message: dict[str, Any]) -> None:
         if not self.requested or self.target is None:
@@ -1328,11 +1353,75 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
         if str(message.get("address", "")) != self.target.address:
             return
         self.rate_tracker.mark()
+        if self.capture_state.active:
+            self.capture_state.audio_messages.append(self._snapshot_audio_message(message))
 
     def current_fps(self) -> float:
         if not self.requested:
             return 0.0
         return self.rate_tracker.fps()
+
+    def is_voice_input_active(self) -> bool:
+        return self.capture_state.active
+
+    def begin_voice_input(self, *, started_at: float) -> bool:
+        if not self.requested or self.target is None or self.capture_state.active:
+            return False
+        self.capture_state.active = True
+        self.capture_state.started_at = float(started_at)
+        self.capture_state.audio_messages.clear()
+        self._set_status("录音中，等待 swipe-tap 结束")
+        return True
+
+    def finish_voice_input(self, *, finished_at: float) -> VoiceCaptureResult | None:
+        if not self.capture_state.active:
+            return None
+        started_at = float(self.capture_state.started_at)
+        audio_messages = list(self.capture_state.audio_messages)
+        result = VoiceCaptureResult(
+            started_at=started_at,
+            finished_at=float(finished_at),
+            audio_message_count=len(audio_messages),
+        )
+        self._reset_voice_capture()
+        if self.requested and self.target is not None:
+            self._set_status("已接入音频流，语音识别占位")
+        self._run_transcription_placeholder(audio_messages, result)
+        return result
+
+    def cancel_voice_input(self) -> bool:
+        if not self.capture_state.active:
+            return False
+        self._reset_voice_capture()
+        if self.requested and self.target is not None:
+            self._set_status("已接入音频流，语音识别占位")
+        return True
+
+    def _reset_voice_capture(self) -> None:
+        self.capture_state.active = False
+        self.capture_state.started_at = 0.0
+        self.capture_state.audio_messages.clear()
+
+    def _snapshot_audio_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "address": str(message.get("address", "")),
+            "name": str(message.get("name", "")),
+            "timestamp": float(message.get("timestamp", 0.0) or 0.0),
+            "local_timestamp": float(message.get("local_timestamp", 0.0) or 0.0),
+            "host_timestamp": float(message.get("host_timestamp", 0.0) or 0.0),
+            "audio_type": int(message.get("audio_type", -1) or -1),
+            "sample_rate": int(message.get("sample_rate", 0) or 0),
+            "data_b64": str(message.get("data_b64", "")),
+        }
+
+    def _run_transcription_placeholder(
+        self,
+        audio_messages: list[dict[str, Any]],
+        result: VoiceCaptureResult,
+    ) -> None:
+        # TODO: 在这里接入录音结束后的语音转写逻辑。
+        _ = audio_messages
+        _ = result
 
 
 class LocalCursorController:
@@ -1669,7 +1758,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         message_layout.setSpacing(8)
         message_title = QLabel("消息栏")
         message_title.setProperty("class", "title")
-        message_desc = QLabel("只显示识别器上报的 JSON 报文。")
+        message_desc = QLabel("显示识别器事件与语音状态 JSON 报文。")
         message_desc.setProperty("class", "sub-text")
         message_layout.addWidget(message_title)
         message_layout.addWidget(message_desc)
@@ -1688,6 +1777,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.stream_connected = connected
         super().on_connected_changed(connected)
         if not connected:
+            self._cancel_voice_input_if_needed(timestamp=time.time())
             self.left_ring_rate.reset()
             self.right_ring_rate.reset()
             self.left_audio_rate.reset()
@@ -1763,7 +1853,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         removed_addresses: list[str],
         changed_connection_addresses: list[str],
     ) -> None:
-        _ = changed_connection_addresses
+        _ = rings
         self._refresh_ring_combos()
         if removed_addresses:
             left_ring = self.selected_ring("left")
@@ -1774,6 +1864,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             if right_ring is not None and right_ring.address in removed_addresses:
                 self.right_ring_rate.reset()
                 self.right_audio_rate.reset()
+        if self._voice_input_invalidated(removed_addresses, changed_connection_addresses):
+            self._cancel_voice_input_if_needed(timestamp=time.time())
         self.refresh_target_labels()
         self.publish_runtime_status()
 
@@ -1810,6 +1902,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             self.publish_runtime_status()
             return
 
+        self._cancel_voice_input_if_needed(timestamp=time.time())
         self.apply_subscription()
         left_ring = self.selected_ring("left")
         right_ring = self.selected_ring("right")
@@ -1825,6 +1918,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.refresh_target_labels()
 
     def stop_all_recognizers(self) -> None:
+        self._cancel_voice_input_if_needed(timestamp=time.time())
         self.pinch_airmouse_move_active = False
         for runtime in self.runtimes.values():
             runtime.deactivate()
@@ -1845,18 +1939,18 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             self._apply_airmouse_cursor_move(data)
         if event_name == "move":
             return
-        self.sequence += 1
         payload = build_recognizer_event(
             RecognizerEventMessage(
                 recognizer=recognizer,
                 event=event_name,
                 timestamp=event_ts,
                 data=dict(data),
-                sequence=self.sequence,
+                sequence=self._next_sequence(),
             )
         )
-        self.message_log.appendPlainText(json.dumps(payload, ensure_ascii=False))
-        self.ws_bridge.send_payload(payload)
+        self._publish_logged_payload(payload)
+        if recognizer == RECOGNIZER_SWIPE and event_name == "tap":
+            self._toggle_voice_input_from_swipe_tap(event_ts)
 
     def on_recognizer_status(self, recognizer: str, status: str) -> None:
         row = self.recognizer_rows.get(recognizer)
@@ -1910,6 +2004,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
     def on_ws_command(self, command: ControlCommandMessage, client: object) -> None:
         if command.action == CONTROL_ACTION_REQUEST_STATUS:
             self.publish_runtime_status(client=client)
+            self._publish_current_voice_status(client=client)
             return
 
         try:
@@ -2029,6 +2124,110 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         vx = float(data.get("move_x", 0.0) or 0.0)
         vy = float(data.get("move_y", 0.0) or 0.0)
         self.local_cursor_controller.move_by(vx, vy)
+
+    def _audio_runtime(self) -> AudioPlaceholderRuntime | None:
+        runtime = self.runtimes.get(RECOGNIZER_AUDIO)
+        if isinstance(runtime, AudioPlaceholderRuntime):
+            return runtime
+        return None
+
+    def _swipe_audio_toggle_enabled(self) -> bool:
+        return self._recognizer_requested(RECOGNIZER_SWIPE) and self._recognizer_requested(RECOGNIZER_AUDIO)
+
+    def _toggle_voice_input_from_swipe_tap(self, event_ts: float) -> None:
+        if not self._swipe_audio_toggle_enabled():
+            return
+        audio_runtime = self._audio_runtime()
+        if audio_runtime is None:
+            return
+        if audio_runtime.is_voice_input_active():
+            result = audio_runtime.finish_voice_input(finished_at=event_ts)
+            if result is None:
+                return
+            self._publish_voice_status(VOICE_STATE_FINISHED, event_ts)
+            return
+        if audio_runtime.begin_voice_input(started_at=event_ts):
+            self._publish_voice_status(VOICE_STATE_LISTENING, event_ts)
+
+    def _cancel_voice_input_if_needed(self, *, timestamp: float) -> None:
+        audio_runtime = self._audio_runtime()
+        if audio_runtime is None:
+            return
+        if audio_runtime.cancel_voice_input():
+            self._publish_voice_status(VOICE_STATE_FINISHED, timestamp)
+
+    def _voice_input_invalidated(
+        self,
+        removed_addresses: list[str],
+        changed_connection_addresses: list[str],
+    ) -> bool:
+        audio_runtime = self._audio_runtime()
+        if audio_runtime is None or not audio_runtime.is_voice_input_active():
+            return False
+
+        watched_addresses: set[str] = set()
+        for recognizer in (RECOGNIZER_AUDIO, RECOGNIZER_SWIPE):
+            runtime = self.runtimes.get(recognizer)
+            if runtime is not None and runtime.target is not None:
+                watched_addresses.add(runtime.target.address)
+
+        removed_set = set(removed_addresses)
+        if watched_addresses & removed_set:
+            return True
+
+        changed_set = set(changed_connection_addresses)
+        for address in watched_addresses & changed_set:
+            ring = self.ring_info.get(address, {})
+            if not bool(ring.get("connected", False)):
+                return True
+        return False
+
+    def _publish_current_voice_status(self, *, client: object) -> None:
+        audio_runtime = self._audio_runtime()
+        if audio_runtime is None or not audio_runtime.is_voice_input_active():
+            return
+        started_at = float(audio_runtime.capture_state.started_at or time.time())
+        self._publish_voice_status(
+            VOICE_STATE_LISTENING,
+            started_at,
+            client=client,
+            log=False,
+        )
+
+    def _publish_voice_status(
+        self,
+        state: str,
+        timestamp: float,
+        *,
+        client: object | None = None,
+        log: bool = True,
+    ) -> None:
+        payload = build_voice_status(
+            VoiceStatusMessage(
+                state=state,
+                timestamp=timestamp,
+                sequence=self._next_sequence(),
+            )
+        )
+        self._send_payload(payload, client=client, log=log)
+
+    def _next_sequence(self) -> int:
+        self.sequence += 1
+        return self.sequence
+
+    def _publish_logged_payload(self, payload: dict[str, Any]) -> None:
+        self._send_payload(payload, log=True)
+
+    def _send_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        client: object | None = None,
+        log: bool = False,
+    ) -> None:
+        if log:
+            self.message_log.appendPlainText(json.dumps(payload, ensure_ascii=False))
+        self.ws_bridge.send_payload(payload, client=client)
 
     def current_streams(self) -> list[str]:
         streams = ["imu"]

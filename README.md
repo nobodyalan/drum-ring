@@ -209,6 +209,39 @@ uv run python apps/your_app.py --host 127.0.0.1 --port 17888
 - 订阅变更时及时清理无效状态
 - UI 与处理解耦：网络线程只负责收包，UI 线程做展示
 
+## Unified Gesture WebSocket 协议
+
+`apps/unified_gesture_app.py` 会通过 WebSocket 向前端发送 JSON 文本消息，默认地址是 `ws://127.0.0.1:18765`。
+
+当前后端下行消息包含：
+
+```json
+{"type":"runtime.status","version":1,"left":{"connected":true,"imu_fps":200.0,"audio_fps":50.0},"right":{"connected":true,"imu_fps":200.0,"audio_fps":50.0}}
+{"type":"recognizer.event","version":1,"recognizer":"audio","event":"text","timestamp":123456.78,"data":{"text":"hello"},"sequence":18}
+{"type":"voice.status","version":1,"recognizer":"audio","state":"listening","timestamp":123456.78,"data":{},"sequence":19}
+{"type":"voice.status","version":1,"recognizer":"audio","state":"finished","timestamp":123457.12,"data":{},"sequence":20}
+```
+
+字段说明：
+
+- `type`
+  - `runtime.status`：运行时连接状态与 IMU / audio 帧率
+  - `recognizer.event`：识别结果事件；语音识别文本仍走这类消息，其中 `recognizer="audio"`、`event="text"`
+  - `voice.status`：语音输入过程状态
+- `state`
+  - `listening`：正在进行语音输入
+  - `finished`：本次语音输入完毕
+- `timestamp`：后端生成该状态时的秒级时间戳（`float`）
+- `sequence`：可选递增序号；前端如果需要按时序去重/排序，可以优先使用这个字段
+- `data`：扩展字段，当前默认空对象，后续如果补充识别耗时、来源设备等信息，会放在这里
+
+控制指令仍沿用现有协议：
+
+```json
+{"type":"control.command","version":1,"action":"request_status","recognizers":[],"payload":{}}
+{"type":"control.command","version":1,"action":"set_recognizers","recognizers":["swipe","pinch","audio"],"payload":{}}
+```
+
 ## 开发常用命令
 
 ```bash

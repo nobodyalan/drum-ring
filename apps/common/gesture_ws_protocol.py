@@ -8,6 +8,7 @@ PROTOCOL_VERSION = 1
 
 MESSAGE_TYPE_EVENT = "recognizer.event"
 MESSAGE_TYPE_STATUS = "runtime.status"
+MESSAGE_TYPE_VOICE_STATUS = "voice.status"
 MESSAGE_TYPE_COMMAND = "control.command"
 MESSAGE_TYPE_ACK = "control.ack"
 MESSAGE_TYPE_ERROR = "control.error"
@@ -49,6 +50,14 @@ EVENT_SNAP = "snap"
 EVENT_TOUCH_DOWN = "touch-down"
 EVENT_TOUCH_UP = "touch-up"
 EVENT_TEXT = "text"
+
+VOICE_STATE_LISTENING = "listening"
+VOICE_STATE_FINISHED = "finished"
+
+ALL_VOICE_STATES = (
+    VOICE_STATE_LISTENING,
+    VOICE_STATE_FINISHED,
+)
 
 WEBSOCKET_RECOGNIZER_EVENTS: dict[str, tuple[str, ...]] = {
     RECOGNIZER_SWIPE: (
@@ -103,6 +112,15 @@ class RecognizerEventMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceStatusMessage:
+    state: str
+    timestamp: float
+    recognizer: str = RECOGNIZER_AUDIO
+    data: dict[str, Any] = field(default_factory=dict)
+    sequence: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ControlCommandMessage:
     action: str
     recognizers: tuple[str, ...] = ()
@@ -115,6 +133,20 @@ def build_recognizer_event(message: RecognizerEventMessage) -> dict[str, Any]:
         "version": PROTOCOL_VERSION,
         "recognizer": message.recognizer,
         "event": message.event,
+        "timestamp": float(message.timestamp),
+        "data": dict(message.data),
+    }
+    if message.sequence is not None:
+        payload["sequence"] = int(message.sequence)
+    return payload
+
+
+def build_voice_status(message: VoiceStatusMessage) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": MESSAGE_TYPE_VOICE_STATUS,
+        "version": PROTOCOL_VERSION,
+        "recognizer": message.recognizer,
+        "state": message.state,
         "timestamp": float(message.timestamp),
         "data": dict(message.data),
     }
