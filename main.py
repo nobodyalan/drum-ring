@@ -621,20 +621,27 @@ class MainWindow(QMainWindow):
         )
         apps_row.addWidget(btn_swipe, 0, 9)
 
+        btn_pinch = QPushButton("Pinch 检测")
+        btn_pinch.setProperty("class", "btn-primary")
+        btn_pinch.clicked.connect(
+            lambda: self.launch_app("apps/pinch_realtime_app.py", "Pinch 检测")
+        )
+        apps_row.addWidget(btn_pinch, 0, 10)
+
         btn_swipe_ctc = QPushButton("Swipe CTC 测试")
         btn_swipe_ctc.setProperty("class", "btn-primary")
         btn_swipe_ctc.clicked.connect(
             lambda: self.launch_app("apps/swipe_ctc_test_app.py", "Swipe CTC 测试")
         )
-        apps_row.addWidget(btn_swipe_ctc, 0, 10)
+        apps_row.addWidget(btn_swipe_ctc, 0, 11)
 
         btn_snake = QPushButton("Snake")
         btn_snake.setProperty("class", "btn-primary")
         btn_snake.clicked.connect(
             lambda: self.launch_app("apps/snake_app.py", "Snake")
         )
-        apps_row.addWidget(btn_snake, 0, 11)
-        apps_row.setColumnStretch(12, 1)
+        apps_row.addWidget(btn_snake, 0, 12)
+        apps_row.setColumnStretch(13, 1)
         apps_panel.setLayout(apps_row)
         main_layout.addWidget(apps_panel)
 

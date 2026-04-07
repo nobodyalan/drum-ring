@@ -1,0 +1,163 @@
+seeds:
+- 3407
+tag: null
+paths:
+  dataset_dir: ${hydra:runtime.cwd}/data/dataset
+  runs_dir: ${hydra:runtime.cwd}/runs
+train:
+  device: cuda:0
+  auto_select_gpus: false
+  num_gpus: 1
+  tf32: true
+  eval_interval: 1
+  enable_validation: true
+  use_wandb: false
+  use_tensorboard: true
+  tensorboard_dir: tensorboard
+  wandb_project: ${task._target_}
+  wandb_entity: null
+  visualize: true
+  num_samples_visualize: 10
+optuna:
+  enabled: true
+  n_trials: 200
+  direction: ${task.optuna_direction}
+  sampler: tpe
+  tpe_constant_liar: true
+  tpe_multivariate: true
+  tpe_group: false
+  tpe_startup_trials: 20
+  tpe_n_ei_candidates: 64
+  pruner: median
+  pruner_startup_trials: 10
+  pruner_warmup_steps: 10
+  pruner_interval_steps: 1
+  seed: 3407
+  study_name: null
+  storage: null
+  journal_path: optuna_journal.log
+  load_if_exists: true
+  timeout_seconds: null
+task:
+  _target_: tasks.task.swipe_cnn_classification.SwipeCNNClassificationTask
+  optuna_direction: maximize
+  dataset: dataset.swipe_dataset.SwipeDataset
+  dataset_dir: ${paths.dataset_dir}/gesture_pinch
+  train_person_ids:
+  - 0
+  - 1
+  - 4
+  - 5
+  - 6
+  - 8
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 16
+  - 17
+  - 19
+  - 20
+  - 21
+  - 23
+  - 25
+  - 26
+  - 27
+  - 28
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  - 36
+  - 37
+  - 38
+  - 39
+  - 40
+  - 41
+  - 43
+  - 44
+  - 45
+  - 47
+  - 48
+  - 49
+  - 51
+  - 53
+  - 56
+  - 57
+  - 58
+  - 65
+  - 66
+  - 67
+  - 68
+  - 69
+  - 999
+  eval_person_ids:
+  - 59
+  - 60
+  - 61
+  - 62
+  - 64
+  train_surface_ids: null
+  eval_surface_ids: null
+  train_gesture_ids: null
+  eval_gesture_ids: null
+  input_dim: 6
+  batch_size: 128
+  num_workers: 8
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.02
+  label_smoothing: 0.1
+  clamp_input: null
+  load_num_workers: null
+  conv_dim: 256
+  input_dropout1d: 0.1
+  grad_clip_norm: 1.0
+  imu_augment:
+    p_jitter: 0.5
+    acc_jitter_std: 0.02
+    gyro_jitter_std: 0.02
+    p_scale: 0.8
+    scale_range:
+    - 0.9
+    - 1.1
+    p_rot: 0.8
+    max_rot_deg: 15.0
+    p_timewarp: 0.0
+    timewarp_strength: 0.3
+    timewarp_knots: 3
+    p_timeshift: 0.0
+    timeshift_ratio_range:
+    - 0.0
+    - 0.1
+  optuna_search:
+    lr:
+      type: float
+      low: 0.0001
+      high: 0.005
+      log: true
+    weight_decay:
+      type: float
+      low: 1.0e-06
+      high: 0.01
+      log: true
+    conv_dim:
+      type: categorical
+      choices:
+      - 64
+      - 96
+      - 128
+      - 192
+    input_dropout1d:
+      type: float
+      low: 0.0
+      high: 0.3
+      step: 0.05
+    label_smoothing:
+      type: float
+      low: 0.0
+      high: 0.2
+      step: 0.05
