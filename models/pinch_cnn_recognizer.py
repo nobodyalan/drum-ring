@@ -27,14 +27,8 @@ PINCH_CLASS_ID_SETS = {
     5: (0, 1, 2, 3, 4),
 }
 
-PINCH_ZSCORE_MEAN = np.array([-0.483, -1.425, -5.978, 0.055, 0.061, -0.023], dtype=np.float32)
-PINCH_ZSCORE_STD = np.array([5.075, 4.969, 5.606, 2.093, 2.465, 1.272], dtype=np.float32)
-# PINCH_ZSCORE_MEAN = np.array([-0.737, -0.537, -5.847, -0.004, 0.024, 0.054], dtype=np.float32)
-# PINCH_ZSCORE_STD = np.array([4.374, 5.150, 4.736, 0.611, 1.550, 0.995], dtype=np.float32)
-# PINCH_ZSCORE_MEAN = np.array([-0.830, -0.499, -5.866, -0.008, 0.024, 0.056], dtype=np.float32)
-# PINCH_ZSCORE_STD = np.array([4.387, 5.281, 4.779, 0.916, 1.732, 1.249], dtype=np.float32)
-# PINCH_ZSCORE_MEAN = np.array([-0.665, -2.524, -4.228, 0.068, 0.026, -0.010], dtype=np.float32)
-# PINCH_ZSCORE_STD = np.array([4.946, 5.200, 5.996, 1.432, 2.195, 1.490], dtype=np.float32)
+PINCH_ZSCORE_MEAN = np.array([-0.491, -1.203, -6.149, 0.066, 0.070, -0.027], dtype=np.float32)
+PINCH_ZSCORE_STD = np.array([5.056, 5.035, 5.676, 2.171, 2.549, 1.258], dtype=np.float32)
 
 @dataclass(frozen=True)
 class PinchPrediction:
