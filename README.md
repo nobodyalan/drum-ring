@@ -217,23 +217,31 @@ uv run python apps/your_app.py --host 127.0.0.1 --port 17888
 
 ```json
 {"type":"runtime.status","version":1,"left":{"connected":true,"imu_fps":200.0,"audio_fps":50.0},"right":{"connected":true,"imu_fps":200.0,"audio_fps":50.0}}
-{"type":"recognizer.event","version":1,"recognizer":"audio","event":"text","timestamp":123456.78,"data":{"text":"hello"},"sequence":18}
-{"type":"voice.status","version":1,"recognizer":"audio","state":"listening","timestamp":123456.78,"data":{},"sequence":19}
-{"type":"voice.status","version":1,"recognizer":"audio","state":"finished","timestamp":123457.12,"data":{},"sequence":20}
+{"type":"recognizer.event","version":1,"recognizer":"audio","event":"text","timestamp":123456.90,"data":{"capture_id":"cap_001","text":"你好","result_type":"partial","is_final":false,"segment_id":0,"start_time":0,"end_time":320,"engine":"doubao-asr-stream"},"sequence":18}
+{"type":"recognizer.event","version":1,"recognizer":"audio","event":"text","timestamp":123457.10,"data":{"capture_id":"cap_001","text":"你好世界","result_type":"final","is_final":true,"segment_id":0,"start_time":0,"end_time":860,"engine":"doubao-asr-stream"},"sequence":19}
+{"type":"voice.status","version":1,"recognizer":"audio","state":"listening","timestamp":123456.78,"data":{"capture_id":"cap_001"},"sequence":20}
+{"type":"voice.status","version":1,"recognizer":"audio","state":"finished","timestamp":123457.12,"data":{"capture_id":"cap_001","audio_message_count":24},"sequence":21}
 ```
 
 字段说明：
 
 - `type`
   - `runtime.status`：运行时连接状态与 IMU / audio 帧率
-  - `recognizer.event`：识别结果事件；语音识别文本仍走这类消息，其中 `recognizer="audio"`、`event="text"`
+  - `recognizer.event`：识别结果事件；语音流式识别文本也走这类消息，其中 `recognizer="audio"`、`event="text"`
   - `voice.status`：语音输入过程状态
 - `state`
   - `listening`：正在进行语音输入
   - `finished`：本次语音输入完毕
 - `timestamp`：后端生成该状态时的秒级时间戳（`float`）
 - `sequence`：可选递增序号；前端如果需要按时序去重/排序，可以优先使用这个字段
-- `data`：扩展字段，当前默认空对象，后续如果补充识别耗时、来源设备等信息，会放在这里
+- `voice.status.data.capture_id`：一次语音输入会话的唯一 ID，前端可用它关联本次 `listening`、`finished` 和文本结果
+- `voice.status.data.audio_message_count`：结束时本次会话实际消费的音频包数量
+- `recognizer.event.data.result_type`
+  - `partial`：流式中间结果
+  - `final`：当前分段最终结果
+- `recognizer.event.data.segment_id`：当前语音会话内的分段序号，从 `0` 开始
+- `recognizer.event.data.start_time` / `end_time`：豆包返回的分段时间范围
+- `data`：其余扩展字段都放在这里
 
 控制指令仍沿用现有协议：
 

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import base64
+import contextlib
 import json
 import math
 import queue
+import struct
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -137,6 +142,16 @@ except Exception as exc:
     QWebSocketServer = None
     HAS_QT_WEBSOCKETS = False
     QT_WEBSOCKETS_ERROR = str(exc)
+
+try:
+    from core.asr.model.doubao_asr_stream import DoubaoASRStream
+
+    HAS_DOUBAO_ASR_RUNTIME = True
+    DOUBAO_ASR_RUNTIME_ERROR = ""
+except Exception as exc:
+    DoubaoASRStream = None
+    HAS_DOUBAO_ASR_RUNTIME = False
+    DOUBAO_ASR_RUNTIME_ERROR = str(exc)
 
 
 STYLE_SHEET = APP_STYLE_SHEET
@@ -323,15 +338,83 @@ class RecognizerRowWidgets:
 @dataclass
 class VoiceCaptureState:
     active: bool = False
+    capture_id: str = ""
     started_at: float = 0.0
-    audio_messages: list[dict[str, Any]] = field(default_factory=list)
+    audio_message_count: int = 0
 
 
 @dataclass(frozen=True)
 class VoiceCaptureResult:
+    capture_id: str
     started_at: float
     finished_at: float
     audio_message_count: int
+
+
+@dataclass(frozen=True)
+class ASRStreamPacket:
+    capture_id: str
+    text: str
+    is_final: bool
+    segment_id: int
+    start_time: int
+    end_time: int
+
+
+class AdpcmDecoder:
+    index_table = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
+
+    step_size_table = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+        19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+        50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+        130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+        337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+        2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+        5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+        15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    ]
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.predsample = 0
+        self.pcm_index = 0
+
+    def decode(self, code: int) -> int:
+        step = self.step_size_table[self.pcm_index]
+        diff = step >> 3
+        if code & 4:
+            diff += step
+        if code & 2:
+            diff += step >> 1
+        if code & 1:
+            diff += step >> 2
+
+        if code & 8:
+            diff = -diff
+        self.predsample += diff
+
+        if self.predsample > 32767:
+            self.predsample = 32767
+        elif self.predsample < -32768:
+            self.predsample = -32768
+
+        self.pcm_index += self.index_table[code]
+        if self.pcm_index < 0:
+            self.pcm_index = 0
+        if self.pcm_index > 88:
+            self.pcm_index = 88
+        return self.predsample
+
+    def decode_packet(self, data: bytes) -> bytes:
+        pcm = bytearray()
+        for value in data:
+            pcm.extend(struct.pack("<h", self.decode(value & 0xF)))
+            pcm.extend(struct.pack("<h", self.decode((value >> 4) & 0xF)))
+        return bytes(pcm)
 
 
 class RateTracker:
@@ -472,6 +555,142 @@ class FrontendWebSocketBridge(QObject):
             return
 
         self.command_received.emit(command, client)
+
+
+class DoubaoASRStreamWorker(QThread):
+    packet_ready = pyqtSignal(object)
+    fatal_error = pyqtSignal(str, str)
+
+    def __init__(self, capture_id: str, sample_rate: int):
+        super().__init__()
+        self.capture_id = capture_id
+        self.sample_rate = max(1, int(sample_rate))
+        self.audio_queue: queue.Queue[bytes | None] = queue.Queue()
+        self.segment_index = 0
+        self._first_packet = True
+        self._last_packet_signature: tuple[Any, ...] | None = None
+        self._last_final_content_signature: tuple[Any, ...] | None = None
+
+    def submit_pcm(self, pcm_bytes: bytes) -> None:
+        if pcm_bytes:
+            self.audio_queue.put_nowait(bytes(pcm_bytes))
+
+    def finish_stream(self) -> None:
+        self.audio_queue.put_nowait(None)
+
+    def run(self) -> None:
+        if DoubaoASRStream is None:
+            self.fatal_error.emit(self.capture_id, DOUBAO_ASR_RUNTIME_ERROR or "Doubao ASR 不可用")
+            return
+        try:
+            asyncio.run(self._run_async())
+        except Exception as exc:
+            self.fatal_error.emit(self.capture_id, str(exc))
+
+    async def _run_async(self) -> None:
+        async with DoubaoASRStream() as doubao:
+            sender_task = asyncio.create_task(self._forward_audio(doubao))
+            try:
+                async for response in doubao.execute():
+                    packet = self._prepare_packet(response)
+                    if packet is not None:
+                        self.packet_ready.emit(packet)
+            finally:
+                if sender_task.done():
+                    await sender_task
+                else:
+                    sender_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await sender_task
+
+    async def _forward_audio(self, doubao: Any) -> None:
+        while True:
+            chunk = await asyncio.to_thread(self.audio_queue.get)
+            if chunk is None:
+                doubao.data_queue.put_nowait(None)
+                return
+            if self._first_packet:
+                chunk = self._wav_header() + chunk
+                self._first_packet = False
+            doubao.data_queue.put_nowait(chunk)
+
+    def _prepare_packet(self, response: Any) -> ASRStreamPacket | None:
+        response_dict = self._response_to_dict(response)
+        if response_dict is None:
+            return None
+
+        utterances = list(response_dict.get("payload_msg", {}).get("result", {}).get("utterances", []) or [])
+        if not utterances:
+            return None
+
+        utterance = utterances[0] or {}
+        text = str(utterance.get("text", "") or "").strip()
+        if not text:
+            return None
+
+        is_final = bool(utterance.get("definite", False))
+        start_time = 0
+        end_time = 0
+        words = list(utterance.get("words", []) or [])
+        if words:
+            start_time = int(words[0].get("start_time", 0) or 0)
+            end_time = int(words[-1].get("end_time", 0) or 0)
+
+        final_content_signature = (text, start_time, end_time)
+        if is_final and final_content_signature == self._last_final_content_signature:
+            return None
+        segment_id = self.segment_index
+        packet = ASRStreamPacket(
+            capture_id=self.capture_id,
+            text=text,
+            is_final=is_final,
+            segment_id=segment_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        signature = (
+            packet.capture_id,
+            packet.segment_id,
+            packet.is_final,
+            packet.text,
+            packet.start_time,
+            packet.end_time,
+        )
+        if signature == self._last_packet_signature:
+            return None
+        self._last_packet_signature = signature
+        if is_final:
+            self._last_final_content_signature = final_content_signature
+            self.segment_index += 1
+        else:
+            self._last_final_content_signature = None
+        return packet
+
+    def _response_to_dict(self, response: Any) -> dict[str, Any] | None:
+        if hasattr(response, "to_dict"):
+            try:
+                response = response.to_dict()
+            except Exception:
+                return None
+        if isinstance(response, dict):
+            return response
+        return None
+
+    def _wav_header(self) -> bytes:
+        channel_num = 1
+        bits_per_sample = 16
+        block_align = channel_num * bits_per_sample // 8
+        byte_rate = self.sample_rate * block_align
+        data_size = 0x22551000
+        riff_size = data_size + 36
+        return (
+            b"RIFF"
+            + struct.pack("<I", riff_size)
+            + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, channel_num, self.sample_rate, byte_rate, block_align, bits_per_sample)
+            + b"data"
+            + struct.pack("<I", data_size)
+        )
 
 
 class InferenceWorker(QThread):
@@ -1333,19 +1552,26 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
     def __init__(self, bus: RecognizerBus):
         super().__init__(RECOGNIZER_AUDIO, bus, ring_role="right")
         self.rate_tracker = RateTracker()
+        self.decoder = AdpcmDecoder()
         self.capture_state = VoiceCaptureState()
+        self.asr_workers: dict[str, DoubaoASRStreamWorker] = {}
+        self.capture_targets: dict[str, RingTarget] = {}
 
     def on_activate(self) -> None:
         self.rate_tracker.reset()
-        self._reset_voice_capture()
+        self._stop_all_asr_workers(wait_ms=1500)
+        self.reset_audio_stream_state()
+        self._reset_voice_capture(clear_capture_id=True)
         if self.target is None:
             self._set_status(self.missing_target_text())
             return
-        self._set_status("已接入音频流，语音识别占位")
+        self._set_status(self._idle_status_text())
 
     def on_deactivate(self) -> None:
         self.rate_tracker.reset()
-        self._reset_voice_capture()
+        self._reset_voice_capture(clear_capture_id=True)
+        self.reset_audio_stream_state()
+        self._stop_all_asr_workers(wait_ms=1500)
 
     def handle_audio(self, message: dict[str, Any]) -> None:
         if not self.requested or self.target is None:
@@ -1353,8 +1579,16 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
         if str(message.get("address", "")) != self.target.address:
             return
         self.rate_tracker.mark()
-        if self.capture_state.active:
-            self.capture_state.audio_messages.append(self._snapshot_audio_message(message))
+        pcm_bytes = self._decode_audio_message(message)
+        if pcm_bytes is None:
+            return
+        if not self.capture_state.active:
+            return
+        self.capture_state.audio_message_count += 1
+        self._ensure_asr_worker(int(message.get("sample_rate", 16000) or 16000))
+        worker = self.asr_workers.get(self.capture_state.capture_id)
+        if worker is not None:
+            worker.submit_pcm(pcm_bytes)
 
     def current_fps(self) -> float:
         if not self.requested:
@@ -1367,61 +1601,142 @@ class AudioPlaceholderRuntime(RecognizerRuntimeBase):
     def begin_voice_input(self, *, started_at: float) -> bool:
         if not self.requested or self.target is None or self.capture_state.active:
             return False
+        if not HAS_DOUBAO_ASR_RUNTIME:
+            self._set_status(f"Doubao ASR 不可用: {DOUBAO_ASR_RUNTIME_ERROR}")
+            return False
+        capture_id = uuid.uuid4().hex
         self.capture_state.active = True
+        self.capture_state.capture_id = capture_id
         self.capture_state.started_at = float(started_at)
-        self.capture_state.audio_messages.clear()
-        self._set_status("录音中，等待 swipe-tap 结束")
+        self.capture_state.audio_message_count = 0
+        self.capture_targets[capture_id] = self.target
+        self._set_status("语音输入中，等待实时转写结果")
         return True
 
     def finish_voice_input(self, *, finished_at: float) -> VoiceCaptureResult | None:
         if not self.capture_state.active:
             return None
+        capture_id = self.capture_state.capture_id
         started_at = float(self.capture_state.started_at)
-        audio_messages = list(self.capture_state.audio_messages)
         result = VoiceCaptureResult(
+            capture_id=capture_id,
             started_at=started_at,
             finished_at=float(finished_at),
-            audio_message_count=len(audio_messages),
+            audio_message_count=int(self.capture_state.audio_message_count),
         )
-        self._reset_voice_capture()
+        worker = self.asr_workers.get(capture_id)
+        if worker is not None:
+            worker.finish_stream()
+        self._reset_voice_capture(clear_capture_id=True)
         if self.requested and self.target is not None:
-            self._set_status("已接入音频流，语音识别占位")
-        self._run_transcription_placeholder(audio_messages, result)
+            self._set_status(self._idle_status_text())
         return result
 
-    def cancel_voice_input(self) -> bool:
+    def cancel_voice_input(self, *, finished_at: float) -> VoiceCaptureResult | None:
         if not self.capture_state.active:
-            return False
-        self._reset_voice_capture()
+            return None
+        capture_id = self.capture_state.capture_id
+        result = VoiceCaptureResult(
+            capture_id=capture_id,
+            started_at=float(self.capture_state.started_at),
+            finished_at=float(finished_at),
+            audio_message_count=int(self.capture_state.audio_message_count),
+        )
+        worker = self.asr_workers.get(capture_id)
+        if worker is not None:
+            worker.finish_stream()
+        self._reset_voice_capture(clear_capture_id=True)
         if self.requested and self.target is not None:
-            self._set_status("已接入音频流，语音识别占位")
-        return True
+            self._set_status(self._idle_status_text())
+        return result
 
-    def _reset_voice_capture(self) -> None:
+    def reset_audio_stream_state(self) -> None:
+        self.decoder.reset()
+
+    def close(self) -> None:
+        self._stop_all_asr_workers(wait_ms=1500)
+
+    def _reset_voice_capture(self, *, clear_capture_id: bool) -> None:
         self.capture_state.active = False
+        if clear_capture_id:
+            self.capture_state.capture_id = ""
         self.capture_state.started_at = 0.0
-        self.capture_state.audio_messages.clear()
+        self.capture_state.audio_message_count = 0
 
-    def _snapshot_audio_message(self, message: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "address": str(message.get("address", "")),
-            "name": str(message.get("name", "")),
-            "timestamp": float(message.get("timestamp", 0.0) or 0.0),
-            "local_timestamp": float(message.get("local_timestamp", 0.0) or 0.0),
-            "host_timestamp": float(message.get("host_timestamp", 0.0) or 0.0),
-            "audio_type": int(message.get("audio_type", -1) or -1),
-            "sample_rate": int(message.get("sample_rate", 0) or 0),
-            "data_b64": str(message.get("data_b64", "")),
-        }
+    def _idle_status_text(self) -> str:
+        if not HAS_DOUBAO_ASR_RUNTIME:
+            return f"Doubao ASR 不可用: {DOUBAO_ASR_RUNTIME_ERROR}"
+        return "已接入音频流，等待 swipe-tap 开始语音输入"
 
-    def _run_transcription_placeholder(
-        self,
-        audio_messages: list[dict[str, Any]],
-        result: VoiceCaptureResult,
-    ) -> None:
-        # TODO: 在这里接入录音结束后的语音转写逻辑。
-        _ = audio_messages
-        _ = result
+    def _decode_audio_message(self, message: dict[str, Any]) -> bytes | None:
+        audio_type = int(message.get("audio_type", -1) or -1)
+        if audio_type != 1:
+            return None
+        data_b64 = message.get("data_b64", "")
+        if not isinstance(data_b64, str) or not data_b64:
+            return None
+        try:
+            raw_audio = base64.b64decode(data_b64)
+        except Exception:
+            return None
+        if not raw_audio:
+            return None
+        return self.decoder.decode_packet(raw_audio)
+
+    def _ensure_asr_worker(self, sample_rate: int) -> None:
+        capture_id = self.capture_state.capture_id
+        if not capture_id or capture_id in self.asr_workers:
+            return
+        worker = DoubaoASRStreamWorker(capture_id, sample_rate)
+        worker.packet_ready.connect(self._on_asr_packet_ready)
+        worker.fatal_error.connect(self._on_asr_fatal_error)
+        worker.finished.connect(lambda cid=capture_id: self._on_asr_worker_finished(cid))
+        self.asr_workers[capture_id] = worker
+        worker.start()
+
+    def _on_asr_packet_ready(self, packet: object) -> None:
+        if not isinstance(packet, ASRStreamPacket):
+            return
+        target = self.capture_targets.get(packet.capture_id)
+        if target is None:
+            return
+        self.bus.recognizer_event.emit(
+            self.name,
+            "text",
+            target,
+            {
+                "capture_id": packet.capture_id,
+                "text": packet.text,
+                "result_type": "final" if packet.is_final else "partial",
+                "is_final": packet.is_final,
+                "segment_id": packet.segment_id,
+                "start_time": packet.start_time,
+                "end_time": packet.end_time,
+                "engine": "doubao-asr-stream",
+            },
+            time.time(),
+        )
+
+    def _on_asr_fatal_error(self, capture_id: str, message: str) -> None:
+        if capture_id == self.capture_state.capture_id:
+            self._reset_voice_capture(clear_capture_id=True)
+        self._set_status(f"Doubao ASR 失败: {message}")
+
+    def _on_asr_worker_finished(self, capture_id: str) -> None:
+        worker = self.asr_workers.pop(capture_id, None)
+        if worker is not None:
+            worker.deleteLater()
+        if capture_id != self.capture_state.capture_id:
+            self.capture_targets.pop(capture_id, None)
+
+    def _stop_all_asr_workers(self, *, wait_ms: int) -> None:
+        for worker in list(self.asr_workers.values()):
+            worker.finish_stream()
+        for capture_id, worker in list(self.asr_workers.items()):
+            worker.wait(wait_ms)
+            self.asr_workers.pop(capture_id, None)
+            self.capture_targets.pop(capture_id, None)
+            worker.deleteLater()
 
 
 class LocalCursorController:
@@ -1778,6 +2093,9 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         super().on_connected_changed(connected)
         if not connected:
             self._cancel_voice_input_if_needed(timestamp=time.time())
+            audio_runtime = self._audio_runtime()
+            if audio_runtime is not None:
+                audio_runtime.reset_audio_stream_state()
             self.left_ring_rate.reset()
             self.right_ring_rate.reset()
             self.left_audio_rate.reset()
@@ -1866,6 +2184,9 @@ class UnifiedGestureWindow(RingStreamWindowBase):
                 self.right_audio_rate.reset()
         if self._voice_input_invalidated(removed_addresses, changed_connection_addresses):
             self._cancel_voice_input_if_needed(timestamp=time.time())
+            audio_runtime = self._audio_runtime()
+            if audio_runtime is not None:
+                audio_runtime.reset_audio_stream_state()
         self.refresh_target_labels()
         self.publish_runtime_status()
 
@@ -2144,17 +2465,38 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             result = audio_runtime.finish_voice_input(finished_at=event_ts)
             if result is None:
                 return
-            self._publish_voice_status(VOICE_STATE_FINISHED, event_ts)
+            self._publish_voice_status(
+                VOICE_STATE_FINISHED,
+                event_ts,
+                data={
+                    "capture_id": result.capture_id,
+                    "audio_message_count": result.audio_message_count,
+                },
+            )
             return
         if audio_runtime.begin_voice_input(started_at=event_ts):
-            self._publish_voice_status(VOICE_STATE_LISTENING, event_ts)
+            self._publish_voice_status(
+                VOICE_STATE_LISTENING,
+                event_ts,
+                data={
+                    "capture_id": audio_runtime.capture_state.capture_id,
+                },
+            )
 
     def _cancel_voice_input_if_needed(self, *, timestamp: float) -> None:
         audio_runtime = self._audio_runtime()
         if audio_runtime is None:
             return
-        if audio_runtime.cancel_voice_input():
-            self._publish_voice_status(VOICE_STATE_FINISHED, timestamp)
+        result = audio_runtime.cancel_voice_input(finished_at=timestamp)
+        if result is not None:
+            self._publish_voice_status(
+                VOICE_STATE_FINISHED,
+                timestamp,
+                data={
+                    "capture_id": result.capture_id,
+                    "audio_message_count": result.audio_message_count,
+                },
+            )
 
     def _voice_input_invalidated(
         self,
@@ -2190,6 +2532,9 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self._publish_voice_status(
             VOICE_STATE_LISTENING,
             started_at,
+            data={
+                "capture_id": audio_runtime.capture_state.capture_id,
+            },
             client=client,
             log=False,
         )
@@ -2199,6 +2544,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         state: str,
         timestamp: float,
         *,
+        data: dict[str, Any] | None = None,
         client: object | None = None,
         log: bool = True,
     ) -> None:
@@ -2206,6 +2552,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             VoiceStatusMessage(
                 state=state,
                 timestamp=timestamp,
+                data=dict(data or {}),
                 sequence=self._next_sequence(),
             )
         )
