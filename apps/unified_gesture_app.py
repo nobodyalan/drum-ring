@@ -133,6 +133,7 @@ except Exception as exc:
 
 STYLE_SHEET = APP_STYLE_SHEET
 IMU_SAMPLE_RATE_HZ = 200.0
+STREAM_SEQUENCE_KEY = "__stream_seq__"
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,7 @@ APP_CONFIG = UnifiedAppConfig(
 class InferenceJob:
     address: str
     values: np.ndarray
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -255,6 +257,7 @@ class InferenceOutput:
     prediction: object
     elapsed_ms: float
     sample_count: int
+    generation: int
 
 
 @dataclass
@@ -269,6 +272,7 @@ class ClassifierState:
 class PendingImuReading:
     data: np.ndarray
     event_ts: float
+    generation: int
 
 
 @dataclass
@@ -445,7 +449,7 @@ class FrontendWebSocketBridge(QObject):
 class InferenceWorker(QThread):
     ready = pyqtSignal()
     result_ready = pyqtSignal(object)
-    job_failed = pyqtSignal(str)
+    job_failed = pyqtSignal(int, str)
     fatal_error = pyqtSignal(str)
 
     def __init__(self, factory: Callable[[], object]):
@@ -490,7 +494,7 @@ class InferenceWorker(QThread):
             try:
                 prediction = recognizer.predict(job.values)
             except Exception as exc:
-                self.job_failed.emit(str(exc))
+                self.job_failed.emit(job.generation, str(exc))
                 continue
 
             self.result_ready.emit(
@@ -499,6 +503,7 @@ class InferenceWorker(QThread):
                     prediction=prediction,
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
                     sample_count=int(job.values.shape[0]),
+                    generation=job.generation,
                 )
             )
 
@@ -829,8 +834,18 @@ class RecognizerRuntimeBase:
         self.requested = False
         self.target: RingTarget | None = None
         self.status_text = "未启动"
+        self._generation = 0
+        self._activation_min_stream_seq = 0
 
-    def activate(self, left_ring: RingTarget | None, right_ring: RingTarget | None) -> None:
+    def activate(
+        self,
+        left_ring: RingTarget | None,
+        right_ring: RingTarget | None,
+        *,
+        min_stream_seq: int = 0,
+    ) -> None:
+        self._generation += 1
+        self._activation_min_stream_seq = max(0, int(min_stream_seq))
         self.requested = True
         self.target = self.resolve_target(left_ring, right_ring)
         if self.target is None:
@@ -839,6 +854,8 @@ class RecognizerRuntimeBase:
         self.on_activate()
 
     def deactivate(self) -> None:
+        self._generation += 1
+        self._activation_min_stream_seq = 0
         self.requested = False
         self.target = None
         self.on_deactivate()
@@ -878,6 +895,11 @@ class RecognizerRuntimeBase:
     def is_running(self) -> bool:
         return self.requested and self.target is not None
 
+    def accepts_stream_seq(self, stream_seq: int) -> bool:
+        if stream_seq <= 0:
+            return True
+        return stream_seq >= self._activation_min_stream_seq
+
     def close(self) -> None:
         pass
 
@@ -903,6 +925,7 @@ class WindowClassifierRuntime(RecognizerRuntimeBase):
         self.state = ClassifierState()
         self.rate_tracker = RateTracker()
         self.worker_busy = False
+        self.inflight_generation: int | None = None
         self.runtime_ready = False
         self.runtime_failed = False
         self.worker = InferenceWorker(factory)
@@ -925,6 +948,7 @@ class WindowClassifierRuntime(RecognizerRuntimeBase):
         self._reset_state()
         self.rate_tracker.reset()
         self.worker_busy = False
+        self.inflight_generation = None
 
     def handle_imu(self, address: str, data: np.ndarray, event_ts: float) -> None:
         _ = event_ts
@@ -961,13 +985,19 @@ class WindowClassifierRuntime(RecognizerRuntimeBase):
         self.worker_busy = False
         self._set_status(f"模型失败: {message}")
 
-    def _on_inference_failed(self, message: str) -> None:
-        self.worker_busy = False
-        if self.requested:
+    def _on_inference_failed(self, generation: int, message: str) -> None:
+        if self.inflight_generation == generation:
+            self.worker_busy = False
+            self.inflight_generation = None
+        if generation == self._generation and self.requested:
             self._set_status(f"推理失败: {message}")
 
     def _on_inference_result(self, result: InferenceOutput) -> None:
-        self.worker_busy = False
+        if self.inflight_generation == result.generation:
+            self.worker_busy = False
+            self.inflight_generation = None
+        if result.generation != self._generation:
+            return
         if not self.requested or self.target is None or result.address != self.target.address:
             return
 
@@ -1006,6 +1036,7 @@ class WindowClassifierRuntime(RecognizerRuntimeBase):
         self.state.frames_since_infer = 0
         self.state.prediction_history.clear()
         self.state.reset_after_frames_remaining = 0
+        self.inflight_generation = None
 
     def _queue_length(self) -> int:
         return max(1, int(round(self.config.stable_window_seconds * IMU_SAMPLE_RATE_HZ / self.config.step_frames)))
@@ -1040,7 +1071,8 @@ class WindowClassifierRuntime(RecognizerRuntimeBase):
         values = np.asarray(list(self.state.samples)[-self.config.window_size :], dtype=np.float32)
         self.state.frames_since_infer = 0
         self.worker_busy = True
-        self.worker.submit(InferenceJob(address=address, values=values))
+        self.inflight_generation = self._generation
+        self.worker.submit(InferenceJob(address=address, values=values, generation=self._generation))
 
     def _update_gesture_state(self, class_id: int) -> int | None:
         history = self.state.prediction_history
@@ -1188,7 +1220,13 @@ class ThreadedMotionRuntime(RecognizerRuntimeBase):
         if not self.requested or self.target is None or address != self.target.address or self.engine is None:
             return
         with self._condition:
-            self.pending.append(PendingImuReading(data=np.asarray(data, dtype=np.float32), event_ts=event_ts))
+            self.pending.append(
+                PendingImuReading(
+                    data=np.asarray(data, dtype=np.float32),
+                    event_ts=event_ts,
+                    generation=self._generation,
+                )
+            )
             self._condition.notify()
 
     def current_fps(self) -> float:
@@ -1224,10 +1262,8 @@ class ThreadedMotionRuntime(RecognizerRuntimeBase):
                 if not self._alive:
                     return
                 reading = self.pending.popleft()
-                target = self.target
-                requested = self.requested
 
-            if not requested or target is None or self.engine is None:
+            if self.engine is None:
                 continue
 
             try:
@@ -1235,6 +1271,15 @@ class ThreadedMotionRuntime(RecognizerRuntimeBase):
             except Exception as exc:
                 self._set_status(f"运行失败: {exc}")
                 continue
+
+            with self._condition:
+                if (
+                    reading.generation != self._generation
+                    or not self.requested
+                    or self.target is None
+                ):
+                    continue
+                target = self.target
 
             self.rate_tracker.mark()
             for event_name, data, event_ts in events:
@@ -1385,6 +1430,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.stream_connected = False
         self.subscription_applied = False
         self.last_status_broadcast_at = 0.0
+        self._stream_seq = 0
+        self._stream_seq_lock = threading.Lock()
 
         self.left_ring_rate = RateTracker()
         self.right_ring_rate = RateTracker()
@@ -1422,6 +1469,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
         self._build_ui()
         self.set_stream_status_label(self.stream_status_label)
+        self.client.add_message_hook(self._annotate_stream_message)
         self.bind_stream_client_signals()
 
         self.ws_bridge = FrontendWebSocketBridge(APP_CONFIG.websocket_host, APP_CONFIG.websocket_port)
@@ -1660,6 +1708,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             return
 
         event_ts = self._message_timestamp(message)
+        stream_seq = int(message.get(STREAM_SEQUENCE_KEY, 0) or 0)
         data = np.asarray(
             [
                 float(acc_raw[0]),
@@ -1680,6 +1729,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             self.right_ring_rate.mark()
 
         for runtime in self.runtimes.values():
+            if not runtime.accepts_stream_seq(stream_seq):
+                continue
             runtime.handle_imu(address, data, event_ts)
 
     def on_rings_updated(
@@ -1739,10 +1790,11 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.apply_subscription()
         left_ring = self.selected_ring("left")
         right_ring = self.selected_ring("right")
+        min_stream_seq = self._current_stream_seq() + 1
 
         for recognizer, runtime in self.runtimes.items():
             if self.recognizer_rows[recognizer].checkbox.isChecked():
-                runtime.activate(left_ring, right_ring)
+                runtime.activate(left_ring, right_ring, min_stream_seq=min_stream_seq)
             else:
                 runtime.deactivate()
 
@@ -1985,6 +2037,15 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         if event_ts <= 0:
             event_ts = time.time()
         return event_ts
+
+    def _annotate_stream_message(self, message: dict[str, Any]) -> None:
+        with self._stream_seq_lock:
+            self._stream_seq += 1
+            message[STREAM_SEQUENCE_KEY] = self._stream_seq
+
+    def _current_stream_seq(self) -> int:
+        with self._stream_seq_lock:
+            return self._stream_seq
 
     def closeEvent(self, event) -> None:
         self.refresh_timer.stop()
