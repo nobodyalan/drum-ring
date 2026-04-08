@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import multiprocessing as mp
 import os
 import queue
@@ -22,7 +23,6 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QPushButton,
     QSpinBox,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -48,7 +48,132 @@ from apps.typering_support.worker import (
     typering_worker_main,
 )
 
-STYLE_SHEET = APP_STYLE_SHEET
+TYPE_RING_EXTRA_STYLE_SHEET = """
+QMainWindow#typeRingWindow,
+QWidget#typeRingRoot {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 #f4f8fd,
+        stop: 0.45 #edf4fb,
+        stop: 1 #f8fbff
+    );
+}
+
+QMainWindow#typeRingWindow QLabel.title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #1f3048;
+}
+
+QMainWindow#typeRingWindow QLabel.sub-text {
+    font-size: 12px;
+    color: #7287a2;
+}
+
+QFrame#topBar,
+QFrame#candidatePanel,
+QFrame#configPanel,
+QFrame#compactConfigPanel {
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid #dde8f3;
+    border-radius: 24px;
+}
+
+QFrame#heroPanel {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 #ffffff,
+        stop: 0.55 #f3f8ff,
+        stop: 1 #edf6ff
+    );
+    border: 1px solid #d7e6f7;
+    border-radius: 26px;
+}
+
+QFrame#configBlock {
+    background: #f8fbff;
+    border: 1px solid #e3edf7;
+    border-radius: 18px;
+}
+
+QMainWindow#typeRingWindow QPushButton {
+    min-height: 34px;
+    border-radius: 12px;
+    font-size: 14px;
+    padding: 6px 16px;
+}
+
+QLabel#heroCaption {
+    font-size: 12px;
+    font-weight: 700;
+    color: #7086a0;
+}
+
+QLabel#targetValue {
+    font-size: 26px;
+    font-weight: 700;
+    color: #18263a;
+    padding: 4px 0 6px 0;
+}
+
+QLabel#inputValue {
+    font-size: 36px;
+    font-weight: 700;
+    color: #0f6fff;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid #dce8f7;
+    border-radius: 18px;
+    padding: 14px 18px;
+}
+
+QLabel#heroMeta {
+    font-size: 12px;
+    color: #6f849f;
+    padding-top: 8px;
+}
+
+QLabel#sectionTitle {
+    font-size: 15px;
+    font-weight: 700;
+    color: #22314a;
+}
+
+QLabel#sectionHint {
+    font-size: 11px;
+    color: #8093ab;
+}
+
+QLabel#fieldLabel {
+    font-size: 12px;
+    font-weight: 700;
+    color: #60748d;
+}
+
+QLabel#deviceStatus {
+    background: #f4f8fc;
+    border: 1px solid #dde8f2;
+    border-radius: 12px;
+    padding: 8px 10px;
+    color: #50657f;
+    font-weight: 600;
+}
+
+QComboBox#settingsField,
+QSpinBox#settingsField {
+    min-height: 34px;
+    border-radius: 12px;
+    padding: 0 10px;
+    font-size: 14px;
+}
+
+QComboBox#settingsField::drop-down {
+    border: none;
+    width: 30px;
+}
+
+"""
+
+STYLE_SHEET = APP_STYLE_SHEET + "\n" + TYPE_RING_EXTRA_STYLE_SHEET
 
 
 class TypeRingWindow(RingStreamWindowBase):
@@ -58,8 +183,9 @@ class TypeRingWindow(RingStreamWindowBase):
 
     def __init__(self, host: str, port: int):
         super().__init__(host=host, port=port)
+        self.setObjectName("typeRingWindow")
         self.setWindowTitle("TypeRing 戒指打字")
-        self.resize(1100, 760)
+        self.resize(1180, 740)
 
         self.root_dir = Path(__file__).resolve().parent.parent
         self.paths = TypeRingPaths(self.root_dir)
@@ -97,9 +223,10 @@ class TypeRingWindow(RingStreamWindowBase):
 
     def _build_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("typeRingRoot")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(14, 14, 14, 14)
+        root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
 
         mono_font = self._build_mono_font(15)
@@ -118,45 +245,137 @@ class TypeRingWindow(RingStreamWindowBase):
         root.addWidget(ring_panel_host)
 
         header = QFrame()
-        header.setProperty("class", "panel")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(16, 14, 16, 14)
-        header_layout.setSpacing(6)
+        header.setObjectName("topBar")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 12, 16, 12)
+        header_layout.setSpacing(12)
+        title_block = QVBoxLayout()
+        title_block.setSpacing(2)
         title = QLabel("TypeRing 双戒指打字")
         title.setProperty("class", "title")
-        desc = QLabel("从主程序连接两枚戒指，在此绑定左右手并可视化打字过程。")
+        desc = QLabel("主显示优先，候选词和配置收到底部。")
         desc.setProperty("class", "sub-text")
-        header_layout.addWidget(title)
-        header_layout.addWidget(desc)
-        header_layout.addWidget(self.status_text)
-        header_layout.addWidget(self.run_status)
+        title_block.addWidget(title)
+        title_block.addWidget(desc)
+        header_layout.addLayout(title_block, 1)
+
+        status_block = QVBoxLayout()
+        status_block.setSpacing(8)
+        status_block.addWidget(self.status_text)
+        status_block.addWidget(self.run_status)
+        header_layout.addLayout(status_block)
         root.addWidget(header)
 
-        body = QGridLayout()
-        body.setHorizontalSpacing(10)
-        body.setVerticalSpacing(10)
-
-        config_panel = QFrame()
-        config_panel.setProperty("class", "panel")
-        config_layout = QVBoxLayout(config_panel)
-        config_layout.setContentsMargins(16, 14, 16, 14)
-        config_layout.setSpacing(8)
-        config_layout.addWidget(QLabel("设备绑定"))
-
         self.left_combo = QComboBox()
+        self.left_combo.setObjectName("settingsField")
         self.right_combo = QComboBox()
+        self.right_combo.setObjectName("settingsField")
         self.model_combo = QComboBox()
         self.model_combo.addItem(self.config.model_name)
         self.phrase_spin = QSpinBox()
+        self.phrase_spin.setObjectName("settingsField")
         self.phrase_spin.setRange(1, 200)
         self.phrase_spin.setValue(self.config.n_phrase)
 
-        config_layout.addWidget(QLabel("左手戒指"))
-        config_layout.addWidget(self.left_combo)
-        config_layout.addWidget(QLabel("右手戒指"))
-        config_layout.addWidget(self.right_combo)
-        config_layout.addWidget(QLabel("短语数量"))
-        config_layout.addWidget(self.phrase_spin)
+        self.left_status = QLabel("左手：未绑定")
+        self.left_status.setObjectName("deviceStatus")
+        self.right_status = QLabel("右手：未绑定")
+        self.right_status.setObjectName("deviceStatus")
+
+        hero_panel = QFrame()
+        hero_panel.setObjectName("heroPanel")
+        hero_layout = QVBoxLayout(hero_panel)
+        hero_layout.setContentsMargins(18, 16, 18, 16)
+        hero_layout.setSpacing(4)
+
+        phrase_caption = QLabel("要输入的文本")
+        phrase_caption.setObjectName("heroCaption")
+        self.phrase_label = QLabel()
+        self.phrase_label.setObjectName("targetValue")
+        self.phrase_label.setWordWrap(True)
+        self.phrase_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.phrase_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.phrase_label.setMinimumHeight(48)
+
+        input_caption = QLabel("正在输入")
+        input_caption.setObjectName("heroCaption")
+        self.input_label = QLabel()
+        self.input_label.setObjectName("inputValue")
+        self.input_label.setWordWrap(True)
+        self.input_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.input_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.input_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.input_label.setMinimumHeight(120)
+
+        self.progress_label = QLabel()
+        self.progress_label.setObjectName("heroMeta")
+
+        hero_layout.addWidget(phrase_caption)
+        hero_layout.addWidget(self.phrase_label)
+        hero_layout.addSpacing(8)
+        hero_layout.addWidget(input_caption)
+        hero_layout.addWidget(self.input_label)
+        hero_layout.addWidget(self.progress_label)
+        root.addWidget(hero_panel)
+
+        lower_row = QHBoxLayout()
+        lower_row.setSpacing(10)
+
+        candidate_panel = QFrame()
+        candidate_panel.setObjectName("candidatePanel")
+        candidate_layout = QVBoxLayout(candidate_panel)
+        candidate_layout.setContentsMargins(16, 14, 16, 14)
+        candidate_layout.setSpacing(8)
+
+        candidate_title = QLabel("候选词矩阵")
+        candidate_title.setObjectName("sectionTitle")
+        candidate_hint = QLabel("3 × 4，不改交互。")
+        candidate_hint.setObjectName("sectionHint")
+        candidate_layout.addWidget(candidate_title)
+        candidate_layout.addWidget(candidate_hint)
+
+        self.candidate_grid = QGridLayout()
+        self.candidate_grid.setContentsMargins(0, 6, 0, 0)
+        self.candidate_grid.setHorizontalSpacing(8)
+        self.candidate_grid.setVerticalSpacing(8)
+        self.candidate_cells: list[QLabel] = []
+        candidate_layout.addLayout(self.candidate_grid)
+        lower_row.addWidget(candidate_panel, 3)
+
+        self._build_candidate_grid()
+
+        config_panel = QFrame()
+        config_panel.setObjectName("compactConfigPanel")
+        config_layout = QVBoxLayout(config_panel)
+        config_layout.setContentsMargins(16, 14, 16, 14)
+        config_layout.setSpacing(8)
+        config_title = QLabel("设备与配置")
+        config_title.setObjectName("sectionTitle")
+        config_hint = QLabel("紧凑模式")
+        config_hint.setObjectName("sectionHint")
+        config_layout.addWidget(config_title)
+        config_layout.addWidget(config_hint)
+
+        config_block = QFrame()
+        config_block.setObjectName("configBlock")
+        binding_layout = QGridLayout(config_block)
+        binding_layout.setContentsMargins(12, 12, 12, 12)
+        binding_layout.setHorizontalSpacing(8)
+        binding_layout.setVerticalSpacing(8)
+        left_label = QLabel("左手戒指")
+        left_label.setObjectName("fieldLabel")
+        right_label = QLabel("右手戒指")
+        right_label.setObjectName("fieldLabel")
+        binding_layout.addWidget(left_label, 0, 0)
+        binding_layout.addWidget(right_label, 0, 1)
+        binding_layout.addWidget(self.left_combo, 1, 0)
+        binding_layout.addWidget(self.right_combo, 1, 1)
+        binding_layout.addWidget(self.left_status, 2, 0)
+        binding_layout.addWidget(self.right_status, 2, 1)
+        phrase_label = QLabel("短语数量")
+        phrase_label.setObjectName("fieldLabel")
+        binding_layout.addWidget(phrase_label, 3, 0)
+        binding_layout.addWidget(self.phrase_spin, 4, 0)
 
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
@@ -169,91 +388,15 @@ class TypeRingWindow(RingStreamWindowBase):
         button_row.addWidget(self.btn_start)
         button_row.addWidget(self.btn_stop)
         button_row.addWidget(self.btn_reset)
-        config_layout.addLayout(button_row)
+        binding_layout.addLayout(button_row, 4, 1)
+        config_layout.addWidget(config_block)
+        lower_row.addWidget(config_panel, 2)
 
-        status_grid = QGridLayout()
-        status_grid.setHorizontalSpacing(8)
-        status_grid.setVerticalSpacing(6)
-        self.left_status = QLabel("左手：未绑定")
-        self.right_status = QLabel("右手：未绑定")
-        status_grid.addWidget(self.left_status, 0, 0)
-        status_grid.addWidget(self.right_status, 1, 0)
-        config_layout.addLayout(status_grid)
-
-        body.addWidget(config_panel, 0, 0)
-
-        text_panel = QFrame()
-        text_panel.setProperty("class", "panel")
-        text_layout = QVBoxLayout(text_panel)
-        text_layout.setContentsMargins(16, 14, 16, 14)
-        text_layout.setSpacing(4)
-
-        phrase_row = QHBoxLayout()
-        phrase_row.setSpacing(10)
-        phrase_row.setContentsMargins(0, 0, 0, 0)
-        phrase_title = QLabel("目标短语")
-        self.phrase_label = QLabel()
-        self.phrase_label.setWordWrap(False)
-        self.phrase_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.phrase_label.setFont(mono_font)
-        self.phrase_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        phrase_row.addWidget(phrase_title)
-        phrase_row.addWidget(self.phrase_label, 1)
-
-        input_row = QHBoxLayout()
-        input_row.setSpacing(10)
-        input_row.setContentsMargins(0, 0, 0, 0)
-        input_title = QLabel("当前输入")
-        self.input_label = QLabel()
-        self.input_label.setWordWrap(False)
-        self.input_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.input_label.setFont(mono_font)
-        self.input_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        input_row.addWidget(input_title)
-        input_row.addWidget(self.input_label, 1)
-
-        self.committed_label = QLabel()
-        self.committed_label.setWordWrap(True)
-        self.committed_label.setFont(mono_font)
-        self.committed_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
-        self.committed_label.setMinimumHeight(72)
-        self.committed_label.setMaximumHeight(120)
-        self.candidate_grid = QGridLayout()
-        self.candidate_grid.setContentsMargins(0, 0, 0, 0)
-        self.candidate_grid.setHorizontalSpacing(4)
-        self.candidate_grid.setVerticalSpacing(0)
-        self.candidate_cells: list[QLabel] = []
-        text_layout.addLayout(phrase_row)
-        text_layout.addLayout(input_row)
-        candidate_title = QLabel("候选词（3 × 4）")
-        candidate_title.setMaximumHeight(22)
-        committed_title = QLabel("已提交文本")
-        committed_title.setMaximumHeight(22)
-        text_layout.addWidget(candidate_title)
-        text_layout.addLayout(self.candidate_grid)
-        text_layout.addWidget(committed_title)
-        text_layout.addWidget(self.committed_label)
-        body.addWidget(text_panel, 0, 1)
-
-        self._build_candidate_grid()
-
-        log_panel = QFrame()
-        log_panel.setProperty("class", "panel")
-        log_layout = QVBoxLayout(log_panel)
-        log_layout.setContentsMargins(16, 14, 16, 14)
-        log_layout.setSpacing(6)
-        log_layout.addWidget(QLabel("事件流"))
-        self.event_log = QTextEdit()
-        self.event_log.setReadOnly(True)
-        self.event_log.setFont(mono_font)
-        self.event_log.setMinimumHeight(260)
-        log_layout.addWidget(self.event_log)
-        body.addWidget(log_panel, 1, 0, 1, 2)
-
-        body.setRowStretch(0, 0)
-        body.setRowStretch(1, 1)
-        body.setColumnStretch(1, 2)
-        root.addLayout(body)
+        root.addLayout(lower_row)
+        root.setStretch(0, 0)
+        root.setStretch(1, 0)
+        root.setStretch(2, 0)
+        root.setStretch(3, 1)
 
         self.btn_start.clicked.connect(self.start_typing)
         self.btn_stop.clicked.connect(self.stop_typing)
@@ -268,11 +411,11 @@ class TypeRingWindow(RingStreamWindowBase):
             for col in range(self.CANDIDATE_COLUMNS):
                 label = QLabel("")
                 label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                label.setMinimumHeight(20)
-                label.setMaximumHeight(20)
+                label.setMinimumHeight(36)
+                label.setMaximumHeight(36)
                 label.setMinimumWidth(0)
                 label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-                label.setFont(self._build_mono_font(14))
+                label.setFont(self._build_mono_font(13))
                 self.candidate_grid.addWidget(label, row, col)
                 self.candidate_cells.append(label)
 
@@ -320,8 +463,30 @@ class TypeRingWindow(RingStreamWindowBase):
         self.update_subscription()
 
     def refresh_binding_status(self) -> None:
-        self.left_status.setText(f"左手：{self.describe_ring(self.left_address)}")
-        self.right_status.setText(f"右手：{self.describe_ring(self.right_address)}")
+        self._update_binding_label(self.left_status, "左手", self.left_address)
+        self._update_binding_label(self.right_status, "右手", self.right_address)
+
+    def _update_binding_label(self, label: QLabel, side: str, address: str) -> None:
+        ring = self.ring_info.get(address) if address else None
+        if not address:
+            label.setText(f"{side} · 未绑定")
+            label.setStyleSheet(
+                "background: #f4f8fc; border: 1px solid #dde8f2; border-radius: 14px; "
+                "padding: 10px 12px; color: #6f839b; font-weight: 600;"
+            )
+            return
+        if not ring or not bool(ring.get("connected")):
+            label.setText(f"{side} · {self.describe_ring(address)}")
+            label.setStyleSheet(
+                "background: #fdf5f4; border: 1px solid #f0d8d4; border-radius: 14px; "
+                "padding: 10px 12px; color: #9d5e58; font-weight: 600;"
+            )
+            return
+        label.setText(f"{side} · {self.describe_ring(address)}")
+        label.setStyleSheet(
+            "background: #eff8f3; border: 1px solid #d5eadc; border-radius: 14px; "
+            "padding: 10px 12px; color: #47735d; font-weight: 600;"
+        )
 
     def describe_ring(self, address: str) -> str:
         if not address:
@@ -432,7 +597,6 @@ class TypeRingWindow(RingStreamWindowBase):
             str(self.paths.bigrams_path),
         )
         self.pending_logs.clear()
-        self.event_log.clear()
         self.spawn_workers()
         self.session_running = True
         self.worker_poll_timer.start()
@@ -488,7 +652,6 @@ class TypeRingWindow(RingStreamWindowBase):
         role = str(message.get("role", ""))
         if msg_type == MSG_READY:
             self.pending_logs.append(TypeRingEventLogEntry(time.time(), role, "worker ready", ""))
-            self.render_logs()
             return
         if msg_type == MSG_ERROR:
             self.run_status.setText(f"{role} worker 错误：{message.get('message', '')}")
@@ -522,7 +685,6 @@ class TypeRingWindow(RingStreamWindowBase):
 
         self.pending_logs.append(TypeRingEventLogEntry(send_ts, role, event_name, action_text))
         self.refresh_ui_state()
-        self.render_logs()
 
     def _repair_interface_phrase_overflow(self) -> None:
         current_phrase = getattr(self.interface, "current_phrase", "")
@@ -554,45 +716,84 @@ class TypeRingWindow(RingStreamWindowBase):
         )
 
     def refresh_ui_state(self) -> None:
-        committed = getattr(self.interface, "committed_inputs", [])
-        self.phrase_label.setText(getattr(self.interface, "current_phrase", ""))
-        self.input_label.setText(getattr(self.interface, "current_input", ""))
-        self.committed_label.setText("\n".join(committed[-3:]) if committed else "")
+        current_phrase = getattr(self.interface, "current_phrase", "")
+        current_input = getattr(self.interface, "current_input", "")
+        phrase_idx = int(getattr(self.interface, "phrase_idx", 0))
+        phrase_total = int(getattr(self.interface, "n_phrase", self.phrase_spin.value()))
+
+        self.phrase_label.setText(self._render_phrase_text(current_phrase, current_input))
+        self.input_label.setText(self._render_input_text(current_input, current_phrase))
+        self.progress_label.setText(
+            f"短语 {min(phrase_idx + 1, max(phrase_total, 1))}/{max(phrase_total, 1)}"
+            f" · 候选区保持 {self.CANDIDATE_ROWS} × {self.CANDIDATE_COLUMNS}"
+        )
         candidates = list(getattr(self.interface, "candidates", []))
         candidate_index = int(getattr(self.interface, "candidate_idx", 0))
         total_cells = self.CANDIDATE_COLUMNS * self.CANDIDATE_ROWS
         for index in range(total_cells):
             label = self.candidate_cells[index]
             if index < len(candidates):
-                prefix = "▶ " if index == candidate_index else "  "
+                prefix = "▶ " if index == candidate_index else "   "
                 label.setText(f"{prefix}{candidates[index]}")
                 if index == candidate_index:
                     label.setStyleSheet(
-                        "color: #1d4ed8; font-weight: 700; padding: 0 2px; background: transparent;"
+                        "background: #0f6fff; border: 1px solid #0f6fff; border-radius: 14px; "
+                        "color: #ffffff; font-weight: 700; padding: 0 12px;"
                     )
                 else:
                     label.setStyleSheet(
-                        "color: #475569; font-weight: 500; padding: 0 2px; background: transparent;"
+                        "background: #f3f7fc; border: 1px solid #e1eaf3; border-radius: 14px; "
+                        "color: #4a617c; font-weight: 600; padding: 0 12px;"
                     )
             else:
                 label.setText("")
                 label.setStyleSheet(
-                    "color: #94a3b8; padding: 0 2px; background: transparent;"
+                    "background: #fbfdff; border: 1px dashed #e7eef6; border-radius: 14px; "
+                    "color: #9cafc2; padding: 0 12px;"
                 )
         self.btn_start.setEnabled(not self.session_running)
         self.btn_stop.setEnabled(self.session_running)
         self.refresh_binding_status()
 
-    def render_logs(self) -> None:
-        lines = []
-        for entry in list(self.pending_logs)[-50:]:
-            ts = time.strftime("%H:%M:%S", time.localtime(entry.timestamp)) if entry.timestamp > 1000 else f"{entry.timestamp:.3f}"
-            suffix = f" | {entry.action}" if entry.action else ""
-            lines.append(f"[{ts}] {entry.source}: {entry.event}{suffix}")
-        self.event_log.setPlainText("\n".join(lines))
-        cursor = self.event_log.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.event_log.setTextCursor(cursor)
+    def _render_phrase_text(self, phrase: str, current_input: str) -> str:
+        if not phrase:
+            return '<span style="color:#8aa0b8;">等待加载短语...</span>'
+
+        matched_len = 0
+        for expected, actual in zip(phrase, current_input):
+            if expected != actual:
+                break
+            matched_len += 1
+
+        matched = html.escape(phrase[:matched_len]).replace(" ", "&nbsp;")
+        pending = html.escape(phrase[matched_len:]).replace(" ", "&nbsp;")
+        return (
+            f'<span style="color:#1b2a40;">{matched}</span>'
+            f'<span style="color:#8ea2b8;">{pending}</span>'
+        )
+
+    def _render_input_text(self, current_input: str, current_phrase: str) -> str:
+        if not current_input:
+            return '<span style="color:#90a3b8;">等待手势输入...</span>'
+
+        matched_len = 0
+        for expected, actual in zip(current_phrase, current_input):
+            if expected != actual:
+                break
+            matched_len += 1
+
+        matched = html.escape(current_input[:matched_len]).replace(" ", "&nbsp;")
+        mismatch = html.escape(current_input[matched_len:]).replace(" ", "&nbsp;")
+        if mismatch:
+            return (
+                f'<span style="color:#0f6fff;">{matched}</span>'
+                f'<span style="color:#d64545;">{mismatch}</span>'
+                f'<span style="color:#9db0c4;">&nbsp;|</span>'
+            )
+        return (
+            f'<span style="color:#0f6fff;">{matched}</span>'
+            f'<span style="color:#9db0c4;">&nbsp;|</span>'
+        )
 
     def _append_session_metrics_log(self) -> None:
         if getattr(self.interface, "toc", None) is None or getattr(self.interface, "tic", None) is None:
@@ -641,7 +842,6 @@ class TypeRingWindow(RingStreamWindowBase):
             self.stop_typing()
         self.interface = TypeRingInterface(str(self.paths.text_phrases_path), n_phrase=self.phrase_spin.value())
         self.pending_logs.clear()
-        self.event_log.clear()
         self.run_status.setText("等待开始")
         self.refresh_ui_state()
 
