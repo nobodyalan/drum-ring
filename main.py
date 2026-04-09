@@ -469,6 +469,7 @@ class MainWindow(QMainWindow):
         self.devices: Dict[str, RingDevice] = {}
         self.cards: Dict[str, DeviceCard] = {}
         self.stream_hub = ImuStreamHub(host=self.STREAM_HOST, port=self.STREAM_PORT)
+        self.stream_hub.command_handler = self.handle_stream_hub_command
         self.app_processes: list[subprocess.Popen] = []
         self._stream_started = False
         self._port_switch_task: asyncio.Task | None = None
@@ -673,6 +674,7 @@ class MainWindow(QMainWindow):
             self.lbl_msg.setText(f"正在切换数据流端口到 {self.STREAM_PORT}...")
             await self.stream_hub.stop()
             self.stream_hub = ImuStreamHub(host=self.STREAM_HOST, port=self.STREAM_PORT)
+            self.stream_hub.command_handler = self.handle_stream_hub_command
             for device in self.devices.values():
                 self.stream_hub.upsert_ring(
                     device.address, device.name, connected=device.is_connected
@@ -690,6 +692,34 @@ class MainWindow(QMainWindow):
         if self._stream_mode_task and not self._stream_mode_task.done():
             self._stream_mode_task.cancel()
         self._stream_mode_task = asyncio.create_task(self.apply_stream_mode_to_connected())
+
+    async def handle_stream_hub_command(self, _session, command: dict[str, Any]):
+        if str(command.get("cmd", "")).strip() != "set_main_audio":
+            return None
+        enabled = bool(command.get("enabled", False))
+        source = str(command.get("source", "remote") or "remote")
+        await self.set_audio_stream_from_remote(enabled=enabled, source=source)
+        return {
+            "type": "ack",
+            "cmd": "set_main_audio",
+            "enabled": enabled,
+            "source": source,
+        }
+
+    async def set_audio_stream_from_remote(self, *, enabled: bool, source: str) -> None:
+        changed = self.chk_audio_stream.isChecked() != enabled
+        if changed:
+            self.chk_audio_stream.blockSignals(True)
+            self.chk_audio_stream.setChecked(enabled)
+            self.chk_audio_stream.blockSignals(False)
+        if self._stream_started:
+            if self._stream_mode_task and not self._stream_mode_task.done():
+                self._stream_mode_task.cancel()
+            await self.apply_stream_mode_to_connected()
+        else:
+            self.lbl_msg.setText(
+                f"收到 {source} 的音频流请求（音频: {'开' if enabled else '关'}）"
+            )
 
     def on_auto_reconnect_changed(self, _state: int):
         enabled = self.chk_auto_reconnect.isChecked()

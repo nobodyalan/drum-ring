@@ -143,6 +143,33 @@ except Exception as exc:
     HAS_QT_WEBSOCKETS = False
     QT_WEBSOCKETS_ERROR = str(exc)
 
+if sys.platform == "darwin":
+    try:
+        from Foundation import (
+            NSActivityAutomaticTerminationDisabled,
+            NSActivitySuddenTerminationDisabled,
+            NSActivityUserInitiated,
+            NSProcessInfo,
+        )
+
+        HAS_MACOS_KEEPALIVE = True
+        MACOS_KEEPALIVE_ERROR = ""
+        MACOS_KEEPALIVE_OPTIONS = (
+            int(NSActivityUserInitiated)
+            | int(NSActivitySuddenTerminationDisabled)
+            | int(NSActivityAutomaticTerminationDisabled)
+        )
+    except Exception as exc:
+        NSProcessInfo = None
+        HAS_MACOS_KEEPALIVE = False
+        MACOS_KEEPALIVE_ERROR = str(exc)
+        MACOS_KEEPALIVE_OPTIONS = 0
+else:
+    NSProcessInfo = None
+    HAS_MACOS_KEEPALIVE = False
+    MACOS_KEEPALIVE_ERROR = "仅支持 macOS"
+    MACOS_KEEPALIVE_OPTIONS = 0
+
 try:
     from core.asr.model.doubao_asr_stream import DoubaoASRStream
 
@@ -555,6 +582,52 @@ class FrontendWebSocketBridge(QObject):
             return
 
         self.command_received.emit(command, client)
+
+
+class MacOSKeepAliveManager:
+    def __init__(self, reason: str):
+        self.reason = str(reason)
+        self.available = HAS_MACOS_KEEPALIVE
+        self.error = MACOS_KEEPALIVE_ERROR
+        self._token = None
+
+    def set_enabled(self, enabled: bool) -> bool:
+        if not enabled:
+            self.disable()
+            return False
+        return self.enable()
+
+    def enable(self) -> bool:
+        if not self.available or NSProcessInfo is None:
+            return False
+        if self._token is not None:
+            return True
+        try:
+            process_info = NSProcessInfo.processInfo()
+            self._token = process_info.beginActivityWithOptions_reason_(
+                MACOS_KEEPALIVE_OPTIONS,
+                self.reason,
+            )
+            self.error = ""
+            return self._token is not None
+        except Exception as exc:
+            self._token = None
+            self.error = str(exc)
+            return False
+
+    def disable(self) -> None:
+        if self._token is None or NSProcessInfo is None:
+            self._token = None
+            return
+        try:
+            NSProcessInfo.processInfo().endActivity_(self._token)
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            self._token = None
+
+    def is_active(self) -> bool:
+        return self._token is not None
 
 
 class DoubaoASRStreamWorker(QThread):
@@ -1871,6 +1944,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.touchpad_cursor_checkbox.setChecked(False)
         self.pinch_airmouse_cursor_checkbox = QCheckBox("Pinch/Airmouse 控制本地光标")
         self.pinch_airmouse_cursor_checkbox.setChecked(False)
+        self.macos_keepalive_checkbox = QCheckBox("macOS 后台保活")
+        self.macos_keepalive_checkbox.setChecked(True)
 
         self.btn_subscribe = QPushButton("订阅")
         self.btn_subscribe.setProperty("class", "btn-primary")
@@ -1886,6 +1961,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.recognizer_rows: dict[str, RecognizerRowWidgets] = {}
         self.pinch_airmouse_move_active = False
         self.local_cursor_controller = LocalCursorController()
+        self.macos_keepalive = MacOSKeepAliveManager("Unified Gesture 后台识别保活")
         self.runtimes = self._build_runtimes()
 
         self._build_ui()
@@ -1905,6 +1981,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.refresh_timer.timeout.connect(self.refresh_metrics)
         self.refresh_timer.start(250)
 
+        self._configure_macos_keepalive_ui()
         self.client.start()
 
     def _build_runtimes(self) -> dict[str, RecognizerRuntimeBase]:
@@ -2028,6 +2105,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             self.pinch_airmouse_cursor_checkbox.setToolTip(f"本地光标控制不可用：{cursor_error}")
         ring_layout.addWidget(self.touchpad_cursor_checkbox, 3, 0, 1, 3)
         ring_layout.addWidget(self.pinch_airmouse_cursor_checkbox, 4, 0, 1, 3)
+        ring_layout.addWidget(self.macos_keepalive_checkbox, 5, 0, 1, 3)
         root.addWidget(ring_panel)
 
         recognizer_panel = QFrame()
@@ -2071,9 +2149,9 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         message_layout = QVBoxLayout(message_panel)
         message_layout.setContentsMargins(16, 14, 16, 14)
         message_layout.setSpacing(8)
-        message_title = QLabel("消息栏")
+        message_title = QLabel("Socket 发送日志")
         message_title.setProperty("class", "title")
-        message_desc = QLabel("显示识别器事件与语音状态 JSON 报文。")
+        message_desc = QLabel("只显示实际经 WebSocket 发出的 payload，并标注广播目标数量。")
         message_desc.setProperty("class", "sub-text")
         message_layout.addWidget(message_title)
         message_layout.addWidget(message_desc)
@@ -2087,6 +2165,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.right_combo.currentIndexChanged.connect(self.refresh_target_labels)
         self.touchpad_cursor_checkbox.toggled.connect(self.on_touchpad_cursor_toggled)
         self.pinch_airmouse_cursor_checkbox.toggled.connect(self.on_pinch_airmouse_cursor_toggled)
+        self.macos_keepalive_checkbox.toggled.connect(self.on_macos_keepalive_toggled)
 
     def on_connected_changed(self, connected: bool) -> None:
         self.stream_connected = connected
@@ -2224,6 +2303,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             return
 
         self._cancel_voice_input_if_needed(timestamp=time.time())
+        self._sync_main_audio_stream_mode()
         self.apply_subscription()
         left_ring = self.selected_ring("left")
         right_ring = self.selected_ring("right")
@@ -2240,6 +2320,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
     def stop_all_recognizers(self) -> None:
         self._cancel_voice_input_if_needed(timestamp=time.time())
+        self._request_main_audio_stream(False)
         self.pinch_airmouse_move_active = False
         for runtime in self.runtimes.values():
             runtime.deactivate()
@@ -2317,10 +2398,10 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             )
         )
         if client is not None:
-            self.ws_bridge.send_payload(payload, client=client)
+            self._send_payload(payload, client=client, log=True)
             return
         if broadcast:
-            self.ws_bridge.send_payload(payload)
+            self._send_payload(payload, log=True)
 
     def on_ws_command(self, command: ControlCommandMessage, client: object) -> None:
         if command.action == CONTROL_ACTION_REQUEST_STATUS:
@@ -2331,14 +2412,15 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         try:
             self.apply_control_command(command)
         except Exception as exc:
-            self.ws_bridge.send_payload(
+            self._send_payload(
                 build_error_message("command_failed", str(exc), payload={"action": command.action}),
                 client=client,
+                log=True,
             )
             return
 
         if command.action == CONTROL_ACTION_SET_RECOGNIZERS:
-            self.ws_bridge.send_payload(
+            self._send_payload(
                 build_ack_message(
                     command.action,
                     ok=True,
@@ -2348,12 +2430,14 @@ class UnifiedGestureWindow(RingStreamWindowBase):
                     },
                 ),
                 client=client,
+                log=True,
             )
             return
 
-        self.ws_bridge.send_payload(
+        self._send_payload(
             build_error_message("unsupported_action", f"unsupported action: {command.action}"),
             client=client,
+            log=True,
         )
 
     def apply_control_command(self, command: ControlCommandMessage) -> None:
@@ -2399,6 +2483,39 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         else:
             self.pinch_airmouse_move_active = False
         self.publish_runtime_status()
+
+    def _configure_macos_keepalive_ui(self) -> None:
+        if not self.macos_keepalive.available:
+            self.macos_keepalive_checkbox.setChecked(False)
+            self.macos_keepalive_checkbox.setEnabled(False)
+            self.macos_keepalive_checkbox.setToolTip(
+                f"后台保活不可用：{self.macos_keepalive.error or 'unknown error'}"
+            )
+            return
+        self.macos_keepalive_checkbox.setToolTip("启用后会在 macOS 上申请前台活动，尽量避免后台 App Nap 节流。")
+        self._apply_macos_keepalive(True)
+
+    def on_macos_keepalive_toggled(self, checked: bool) -> None:
+        self._apply_macos_keepalive(checked)
+
+    def _apply_macos_keepalive(self, enabled: bool) -> None:
+        active = self.macos_keepalive.set_enabled(enabled)
+        if enabled and not active:
+            self.subscription_status_label.setText(
+                f"macOS 后台保活开启失败：{self.macos_keepalive.error or 'unknown error'}"
+            )
+            if self.macos_keepalive_checkbox.isChecked():
+                self.macos_keepalive_checkbox.blockSignals(True)
+                self.macos_keepalive_checkbox.setChecked(False)
+                self.macos_keepalive_checkbox.blockSignals(False)
+            return
+        state = "已开启" if active else "已关闭"
+        self.macos_keepalive_checkbox.setToolTip(
+            "启用后会在 macOS 上申请前台活动，尽量避免后台 App Nap 节流。"
+            if self.macos_keepalive.available
+            else f"后台保活不可用：{self.macos_keepalive.error or 'unknown error'}"
+        )
+        self.subscription_status_label.setText(f"macOS 后台保活{state}")
 
     def _pinch_airmouse_cursor_enabled(self) -> bool:
         return self.pinch_airmouse_cursor_checkbox.isChecked() and self.local_cursor_controller.available()
@@ -2536,7 +2653,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
                 "capture_id": audio_runtime.capture_state.capture_id,
             },
             client=client,
-            log=False,
+            log=True,
         )
 
     def _publish_voice_status(
@@ -2565,6 +2682,19 @@ class UnifiedGestureWindow(RingStreamWindowBase):
     def _publish_logged_payload(self, payload: dict[str, Any]) -> None:
         self._send_payload(payload, log=True)
 
+    def _sync_main_audio_stream_mode(self) -> None:
+        enabled = self.recognizer_rows[RECOGNIZER_AUDIO].checkbox.isChecked()
+        self._request_main_audio_stream(enabled)
+
+    def _request_main_audio_stream(self, enabled: bool) -> None:
+        self.client.send_command(
+            {
+                "cmd": "set_main_audio",
+                "enabled": bool(enabled),
+                "source": "unified_gesture_app",
+            }
+        )
+
     def _send_payload(
         self,
         payload: dict[str, Any],
@@ -2573,7 +2703,11 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         log: bool = False,
     ) -> None:
         if log:
-            self.message_log.appendPlainText(json.dumps(payload, ensure_ascii=False))
+            scope = "unicast" if client is not None else "broadcast"
+            target_count = 1 if client is not None else self.ws_bridge.client_count()
+            self.message_log.appendPlainText(
+                f"[ws {scope} targets={target_count}] {json.dumps(payload, ensure_ascii=False)}"
+            )
         self.ws_bridge.send_payload(payload, client=client)
 
     def current_streams(self) -> list[str]:
@@ -2681,6 +2815,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
     def closeEvent(self, event) -> None:
         self.refresh_timer.stop()
+        self.macos_keepalive.disable()
+        self._request_main_audio_stream(False)
         self.client.stop()
         self.client.wait(1500)
         for runtime in self.runtimes.values():

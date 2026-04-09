@@ -1,9 +1,10 @@
 import asyncio
 import base64
 import contextlib
+import inspect
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 @dataclass
@@ -31,6 +32,7 @@ class ImuStreamHub:
         self._server: asyncio.base_events.Server | None = None
         self._clients: set[ClientSession] = set()
         self._rings: dict[str, RingInfo] = {}
+        self.command_handler: Callable[[ClientSession, dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any] | None] | None] | None = None
 
     async def start(self) -> None:
         if self._server is not None:
@@ -177,7 +179,7 @@ class ImuStreamHub:
                         json.dumps({"type": "error", "message": "invalid_json"}),
                     )
                     continue
-                self._handle_command(session, command)
+                await self._handle_command(session, command)
         finally:
             self._clients.discard(session)
             if session.writer_task is not None:
@@ -188,7 +190,7 @@ class ImuStreamHub:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
-    def _handle_command(self, session: ClientSession, command: dict[str, Any]) -> None:
+    async def _handle_command(self, session: ClientSession, command: dict[str, Any]) -> None:
         cmd = command.get("cmd")
         if cmd == "subscribe":
             rings = command.get("rings")
@@ -217,6 +219,21 @@ class ImuStreamHub:
         if cmd == "status":
             self._enqueue_for_client(session, self._status_message())
             return
+
+        if self.command_handler is not None:
+            try:
+                response = self.command_handler(session, command)
+                if inspect.isawaitable(response):
+                    response = await response
+            except Exception as exc:
+                self._enqueue_for_client(
+                    session,
+                    json.dumps({"type": "error", "message": f"command_handler_failed: {exc}"}),
+                )
+                return
+            if response is not None:
+                self._enqueue_for_client(session, json.dumps(response, ensure_ascii=False))
+                return
 
         self._enqueue_for_client(
             session,
