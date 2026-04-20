@@ -17,10 +17,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-try:
-    from common.ui_style import APP_STYLE_SHEET
-except ImportError:
-    from apps.common.ui_style import APP_STYLE_SHEET
+from apps.framework.bootstrap import create_base_parser, run_window
+from apps.framework.ui_style import APP_STYLE_SHEET
 
 
 STYLE_SHEET = (
@@ -578,19 +576,16 @@ class SnakeGameWindow(QWidget):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=17888)
+    parser = create_base_parser()
     return parser.parse_args()
 
 
 def main() -> int:
     _ = parse_args()
-    app = QApplication(sys.argv)
-    app.setStyleSheet(STYLE_SHEET)
-    window = SnakeGameWindow()
-    window.show()
-    return app.exec()
+    return run_window(
+        SnakeGameWindow,
+        style_sheet=STYLE_SHEET,
+    )
 
 
 if __name__ == "__main__":

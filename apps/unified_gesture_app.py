@@ -33,88 +33,44 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from tsai.models.InceptionTime import InceptionTime
-
 APP_ROOT = Path(__file__).resolve().parent.parent
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
 
-try:
-    from common.stream_window import NONE_SUBSCRIPTION, RingStreamWindowBase
-    from common.ui_style import APP_STYLE_SHEET
-    from common.gesture_ws_protocol import (
-        ALL_RECOGNIZERS,
-        CONTROL_ACTION_REQUEST_STATUS,
-        CONTROL_ACTION_SET_RECOGNIZERS,
-        RECOGNIZER_AIRMOUSE,
-        RECOGNIZER_AUDIO,
-        RECOGNIZER_PINCH,
-        RECOGNIZER_SNAP,
-        RECOGNIZER_SWIPE,
-        RECOGNIZER_TOUCHPAD,
-        RECOGNIZER_TYPE,
-        ControlCommandMessage,
-        RecognizerEventMessage,
-        RingTarget,
-        RingStatus,
-        RuntimeStatusMessage,
-        VOICE_STATE_FINISHED,
-        VOICE_STATE_LISTENING,
-        VoiceStatusMessage,
-        build_ack_message,
-        build_error_message,
-        build_recognizer_event,
-        build_runtime_status,
-        build_voice_status,
-        parse_control_command,
-    )
-except ModuleNotFoundError:
-    from apps.common.stream_window import NONE_SUBSCRIPTION, RingStreamWindowBase
-    from apps.common.ui_style import APP_STYLE_SHEET
-    from apps.common.gesture_ws_protocol import (
-        ALL_RECOGNIZERS,
-        CONTROL_ACTION_REQUEST_STATUS,
-        CONTROL_ACTION_SET_RECOGNIZERS,
-        RECOGNIZER_AIRMOUSE,
-        RECOGNIZER_AUDIO,
-        RECOGNIZER_PINCH,
-        RECOGNIZER_SNAP,
-        RECOGNIZER_SWIPE,
-        RECOGNIZER_TOUCHPAD,
-        RECOGNIZER_TYPE,
-        ControlCommandMessage,
-        RecognizerEventMessage,
-        RingTarget,
-        RingStatus,
-        RuntimeStatusMessage,
-        VOICE_STATE_FINISHED,
-        VOICE_STATE_LISTENING,
-        VoiceStatusMessage,
-        build_ack_message,
-        build_error_message,
-        build_recognizer_event,
-        build_runtime_status,
-        build_voice_status,
-        parse_control_command,
-    )
-
-from apps.gesture_recognition_app import GestureConfig, GestureInferenceWorker
-from models.pinch_cnn_recognizer import PinchCNNRecognizer
-from models.swipe_cnn_recognizer import SwipeCNNRecognizer
-from models.tcn_lstm import TCNLSTMStreaming
-from utils.cd_ratio import CDRatioEstimator, OneEuroFilter
-from utils.imu_processor import IMUProcessor
-from utils.window import Window
-
-try:
-    from pyquaternion import Quaternion as PyQuaternion
-
-    HAS_AIRMOUSE_RUNTIME = True
-    AIRMOUSE_RUNTIME_ERROR = ""
-except Exception as exc:
-    PyQuaternion = None
-    HAS_AIRMOUSE_RUNTIME = False
-    AIRMOUSE_RUNTIME_ERROR = str(exc)
+from apps.features.airmouse import AirmouseConfig, AirmouseEngine
+from apps.features.gesture.runtime import GestureConfig, GestureInferenceWorker
+from apps.features.gesture.ws_protocol import (
+    ALL_RECOGNIZERS,
+    CONTROL_ACTION_REQUEST_STATUS,
+    CONTROL_ACTION_SET_RECOGNIZERS,
+    RECOGNIZER_AIRMOUSE,
+    RECOGNIZER_AUDIO,
+    RECOGNIZER_PINCH,
+    RECOGNIZER_SNAP,
+    RECOGNIZER_SWIPE,
+    RECOGNIZER_TOUCHPAD,
+    RECOGNIZER_TYPE,
+    ControlCommandMessage,
+    RecognizerEventMessage,
+    RingTarget,
+    RingStatus,
+    RuntimeStatusMessage,
+    VOICE_STATE_FINISHED,
+    VOICE_STATE_LISTENING,
+    VoiceStatusMessage,
+    build_ack_message,
+    build_error_message,
+    build_recognizer_event,
+    build_runtime_status,
+    build_voice_status,
+    parse_control_command,
+)
+from apps.features.touchpad import TouchpadConfig, TouchpadEngine
+from apps.features.window_classifier import (
+    PINCH_PRESET,
+    SWIPE_PRESET,
+)
+from apps.framework.bootstrap import create_base_parser, run_window
+from apps.framework.stream_window import NONE_SUBSCRIPTION, RingStreamWindowBase
+from apps.framework.ui_style import APP_STYLE_SHEET
 
 try:
     from pynput import mouse
@@ -212,33 +168,6 @@ class SnapRecognizerConfig:
 
 
 @dataclass(frozen=True)
-class TouchpadRecognizerConfig:
-    gesture_ckpt: Path
-    motion_ckpt: Path
-    gesture_window_size: int = 20
-    gesture_calculate_interval: int = 2
-    gesture_history_size: int = 5
-    threshold_down: int = 1
-    threshold_up: int = 2
-    click_interval_seconds: float = 0.1
-    idle_gyro_threshold: float = 0.03
-    min_move_abs: float = 0.05
-    move_emit_interval_seconds: float = 1 / 30.0
-
-
-@dataclass(frozen=True)
-class AirmouseRecognizerConfig:
-    pointer_scale: float = 4000.0
-    min_move_abs: float = 0.05
-    move_emit_interval_seconds: float = 1 / 60.0
-    filter_min_cutoff: float = 1.0
-    filter_beta: float = 0.2
-    filter_d_cutoff: float = 1.0
-    cursor_home_x_ratio: float = 0.5
-    cursor_home_y_ratio: float = 0.5
-
-
-@dataclass(frozen=True)
 class UnifiedAppConfig:
     websocket_enabled: bool
     websocket_host: str
@@ -248,8 +177,8 @@ class UnifiedAppConfig:
     swipe: WindowClassifierConfig
     pinch: WindowClassifierConfig
     snap: SnapRecognizerConfig
-    touchpad: TouchpadRecognizerConfig
-    airmouse: AirmouseRecognizerConfig
+    touchpad: TouchpadConfig
+    airmouse: AirmouseConfig
 
 
 APP_CONFIG = UnifiedAppConfig(
@@ -259,22 +188,22 @@ APP_CONFIG = UnifiedAppConfig(
     message_log_limit=300,
     status_broadcast_interval_seconds=1.0,
     swipe=WindowClassifierConfig(
-        checkpoint_dir=APP_ROOT / "checkpoint" / "swipe" / "cls",
+        checkpoint_dir=SWIPE_PRESET.spec.checkpoint_dir,
         backend="openvino",
-        window_size=60,
+        window_size=SWIPE_PRESET.spec.default_window_size,
         step_frames=2,
         stable_window_seconds=0.05,
         positive_ratio=1,
-        reset_delay_frames=10,
+        reset_delay_frames=SWIPE_PRESET.spec.default_reset_delay_frames,
     ),
     pinch=WindowClassifierConfig(
-        checkpoint_dir=APP_ROOT / "checkpoint" / "swipe" / "cls-pinch",
+        checkpoint_dir=PINCH_PRESET.spec.checkpoint_dir,
         backend="openvino",
-        window_size=60,
-        step_frames=2,
-        stable_window_seconds=0.05,
-        positive_ratio=1,
-        reset_delay_frames=2,
+        window_size=PINCH_PRESET.spec.default_window_size,
+        step_frames=PINCH_PRESET.spec.default_step_frames,
+        stable_window_seconds=PINCH_PRESET.spec.default_stable_window_seconds,
+        positive_ratio=PINCH_PRESET.spec.default_positive_ratio,
+        reset_delay_frames=PINCH_PRESET.spec.default_reset_delay_frames,
     ),
     snap=SnapRecognizerConfig(
         allowed_gestures=(16,),
@@ -288,11 +217,11 @@ APP_CONFIG = UnifiedAppConfig(
         merge_window_seconds=0.5,
         target_fps=50.0,
     ),
-    touchpad=TouchpadRecognizerConfig(
+    touchpad=TouchpadConfig(
         gesture_ckpt=APP_ROOT / "checkpoint" / "tap-94.pth",
         motion_ckpt=APP_ROOT / "checkpoint" / "tcnlstm.pt",
     ),
-    airmouse=AirmouseRecognizerConfig(
+    airmouse=AirmouseConfig(
         pointer_scale=4000.0,
         cursor_home_x_ratio=0.5,
         cursor_home_y_ratio=0.5,
@@ -326,32 +255,10 @@ class ClassifierState:
 
 @dataclass
 class PendingImuReading:
+    address: str
     data: np.ndarray
     event_ts: float
     generation: int
-
-
-@dataclass
-class TouchpadModelState:
-    gesture_detector: "GestureDetector"
-    motion_model: TCNLSTMStreaming
-    imu_processor: IMUProcessor
-    cd_ratio_estimator: CDRatioEstimator
-    filter_x: OneEuroFilter
-    filter_y: OneEuroFilter
-    imu_data: deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=1))
-    last_gesture: int = 3
-    last_down_time: float = 0.0
-    last_move_emit_time: float = 0.0
-
-
-@dataclass
-class AirmouseState:
-    imu_processor: IMUProcessor
-    filter_x: OneEuroFilter
-    filter_y: OneEuroFilter
-    orientation_queue: deque = field(default_factory=lambda: deque(maxlen=2))
-    last_move_emit_time: float = 0.0
 
 
 @dataclass
@@ -828,324 +735,6 @@ class InferenceWorker(QThread):
             )
 
 
-class GestureDetector:
-    def __init__(self, model: InceptionTime, config: TouchpadRecognizerConfig, device: torch.device):
-        self.device = device
-        self.model = model
-        self.config = config
-        self.data_buffer: deque[np.ndarray] = deque()
-        self.imu_window: Window[np.ndarray] = Window(config.gesture_window_size)
-        self.cur_time_state = 0
-        self.history_queue = deque(maxlen=config.gesture_history_size)
-
-    def detect(self, data: np.ndarray) -> int:
-        outputs = self.model(torch.from_numpy(data.T).float().view(1, 6, 20).to(self.device))
-        pred = int(torch.argmax(outputs, dim=1).detach().cpu().item())
-        self.history_queue.append(pred)
-
-        if self.history_queue.count(0) >= self.config.threshold_down:
-            self.history_queue.clear()
-            return 4
-        if self.history_queue.count(1) >= self.config.threshold_up:
-            self.history_queue.clear()
-            return 3
-        return 0
-
-    def calculate(self, data: np.ndarray) -> int:
-        self.data_buffer.append(data)
-        while self.data_buffer:
-            self.imu_window.push(self.data_buffer.popleft())
-        data_window = self.imu_window.map(lambda item: item).to_numpy().reshape(-1, 6)
-        if data_window.shape[0] != self.config.gesture_window_size:
-            return 0
-        if self.cur_time_state < self.config.gesture_calculate_interval:
-            self.cur_time_state += 1
-            return 0
-        self.cur_time_state = 0
-        return self.detect(data_window)
-
-
-class TouchpadRecognizerEngine:
-    def __init__(self, config: TouchpadRecognizerConfig):
-        self.config = config
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.gesture_state_dict = self._load_gesture_state_dict(config.gesture_ckpt)
-        self.motion_state_dict = self._load_motion_state_dict(config.motion_ckpt)
-        self.state: TouchpadModelState | None = None
-        self.cursor_control_enabled = False
-        self.mouse_controller = mouse.Controller() if HAS_TOUCHPAD_CURSOR_CONTROL else None
-
-        monitors = []
-        if HAS_TOUCHPAD_CURSOR_CONTROL and get_monitors is not None:
-            try:
-                monitors = get_monitors()
-            except Exception:
-                monitors = []
-        if monitors:
-            self.left = min(m.x for m in monitors)
-            self.top = min(m.y for m in monitors)
-            self.right = max(m.x + m.width for m in monitors)
-            self.bottom = max(m.y + m.height for m in monitors)
-        else:
-            self.left = -10**9
-            self.top = -10**9
-            self.right = 10**9
-            self.bottom = 10**9
-
-    def clear(self) -> None:
-        self.state = None
-
-    def set_cursor_control_enabled(self, enabled: bool) -> None:
-        self.cursor_control_enabled = bool(enabled) and self.mouse_controller is not None
-
-    def process_imu(self, data: np.ndarray, event_ts: float) -> list[tuple[str, dict[str, Any], float]]:
-        state = self._state()
-        events: list[tuple[str, dict[str, Any], float]] = []
-
-        linear_data = data.copy()
-        if state.imu_processor.pre_timestamp == 0:
-            state.imu_processor.init_quaternion_and_timestamp(data[:3], timestamp=1)
-        else:
-            state.imu_processor.update_attitude_by_data(data[3:6], data[:3])
-        linear_data[:3] = state.imu_processor.calculate_linear_acceleration(data[:3])
-        state.imu_data.append(linear_data)
-
-        current_gesture = state.gesture_detector.calculate(linear_data)
-        if current_gesture != 0:
-            events.extend(self._handle_gesture_transition(state, current_gesture, event_ts))
-
-        if len(state.imu_data) < state.imu_data.maxlen:
-            return events
-
-        merged_data = torch.tensor(np.array(state.imu_data), dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            output = state.motion_model(merged_data.unsqueeze(0))
-        outputs = output.detach().cpu().numpy()
-        if outputs.shape != (1, 1, 2):
-            raise RuntimeError(f"unexpected touchpad output shape: {outputs.shape}")
-
-        result = outputs[0]
-        if np.mean(np.abs(data[3:6])) < self.config.idle_gyro_threshold:
-            result = np.array([[0.0, 0.0]], dtype=np.float32)
-
-        if state.last_gesture == 4:
-            if self.cursor_control_enabled:
-                self._move_mouse(state, result)
-            events.extend(self._build_move_events(state, result, event_ts))
-        return events
-
-    def _handle_gesture_transition(
-        self,
-        state: TouchpadModelState,
-        current_gesture: int,
-        event_ts: float,
-    ) -> list[tuple[str, dict[str, Any], float]]:
-        events: list[tuple[str, dict[str, Any], float]] = []
-        now = time.time()
-        if current_gesture == 4:
-            state.last_down_time = now
-            if state.last_gesture != 4:
-                events.append(("touch-down", {}, event_ts))
-        elif current_gesture == 3:
-            if state.last_gesture != 3:
-                events.append(("touch-up", {}, event_ts))
-            if (
-                self.cursor_control_enabled
-                and self.mouse_controller is not None
-                and state.last_gesture == 4
-                and now - state.last_down_time < self.config.click_interval_seconds
-            ):
-                try:
-                    self.mouse_controller.click(mouse.Button.left)
-                except Exception:
-                    pass
-        state.last_gesture = current_gesture
-        return events
-
-    def _build_move_events(
-        self,
-        state: TouchpadModelState,
-        outputs: np.ndarray,
-        event_ts: float,
-    ) -> list[tuple[str, dict[str, Any], float]]:
-        events: list[tuple[str, dict[str, Any], float]] = []
-        for output in outputs:
-            vx = float(output[0]) / 10.0 * 9.0
-            vy = float(output[1]) / 10.0 * 9.0
-            velocity_norm = float(np.linalg.norm([vx, vy]))
-            cd_ratio = state.cd_ratio_estimator.update(velocity_norm)
-            vx = float(state.filter_x.filter(vx))
-            vy = float(state.filter_y.filter(vy))
-            vx *= cd_ratio
-            vy *= cd_ratio
-
-            now = time.perf_counter()
-            if now - state.last_move_emit_time < self.config.move_emit_interval_seconds:
-                continue
-            if abs(vx) < self.config.min_move_abs and abs(vy) < self.config.min_move_abs:
-                continue
-
-            state.last_move_emit_time = now
-            events.append(
-                (
-                    "move",
-                    {
-                        "move_x": vx,
-                        "move_y": vy,
-                    },
-                    event_ts,
-                )
-            )
-        return events
-
-    def _move_mouse(self, state: TouchpadModelState, outputs: np.ndarray) -> None:
-        if self.mouse_controller is None:
-            return
-
-        for output in outputs:
-            vx = float(output[0]) / 10.0 * 9.0
-            vy = float(output[1]) / 10.0 * 9.0
-            velocity_norm = float(np.linalg.norm([vx, vy]))
-            cd_ratio = state.cd_ratio_estimator.update(velocity_norm)
-            vx = float(state.filter_x.filter(vx))
-            vy = float(state.filter_y.filter(vy))
-            vx *= cd_ratio
-            vy *= cd_ratio
-
-            cx, cy = self.mouse_controller.position
-            if cx + vx < self.left:
-                vx = self.left - cx
-            elif cx + vx > self.right:
-                vx = self.right - cx
-            if cy + vy < self.top:
-                vy = self.top - cy
-            elif cy + vy > self.bottom:
-                vy = self.bottom - cy
-
-            try:
-                self.mouse_controller.move(vx, vy)
-            except Exception:
-                return
-
-    def _state(self) -> TouchpadModelState:
-        if self.state is not None:
-            return self.state
-
-        gesture_model = InceptionTime(6, 4, nf=16).to(self.device)
-        gesture_model.load_state_dict(self.gesture_state_dict)
-        gesture_model.eval()
-
-        motion_model = TCNLSTMStreaming(6, 128, 2, [64, 128], 3, 0.2).to(self.device)
-        motion_model.load_state_dict(self.motion_state_dict)
-        motion_model.eval()
-
-        self.state = TouchpadModelState(
-            gesture_detector=GestureDetector(gesture_model, self.config, self.device),
-            motion_model=motion_model,
-            imu_processor=IMUProcessor(frequency=200, core="VQF"),
-            cd_ratio_estimator=CDRatioEstimator(min_cd=0.3, max_cd=2.0, c=0.2),
-            filter_x=OneEuroFilter(freq=200, min_cutoff=0.0004, beta=0.08),
-            filter_y=OneEuroFilter(freq=200, min_cutoff=0.0004, beta=0.08),
-        )
-        return self.state
-
-    def _load_gesture_state_dict(self, checkpoint_path: Path) -> dict[str, torch.Tensor]:
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        if not isinstance(checkpoint, dict) or "model" not in checkpoint:
-            raise RuntimeError(f"invalid gesture checkpoint: {checkpoint_path}")
-        return checkpoint["model"]
-
-    def _load_motion_state_dict(self, checkpoint_path: Path) -> dict[str, torch.Tensor]:
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        if not isinstance(checkpoint, dict):
-            raise RuntimeError(f"invalid motion checkpoint: {checkpoint_path}")
-        return checkpoint
-
-
-class AirmouseRecognizerEngine:
-    def __init__(self, config: AirmouseRecognizerConfig):
-        if not HAS_AIRMOUSE_RUNTIME:
-            raise RuntimeError(AIRMOUSE_RUNTIME_ERROR)
-        self.config = config
-        self.state = AirmouseState(
-            imu_processor=IMUProcessor(frequency=200, core="VQF"),
-            filter_x=OneEuroFilter(
-                freq=200,
-                min_cutoff=config.filter_min_cutoff,
-                beta=config.filter_beta,
-                d_cutoff=config.filter_d_cutoff,
-            ),
-            filter_y=OneEuroFilter(
-                freq=200,
-                min_cutoff=config.filter_min_cutoff,
-                beta=config.filter_beta,
-                d_cutoff=config.filter_d_cutoff,
-            ),
-        )
-
-    def clear(self) -> None:
-        self.state = AirmouseState(
-            imu_processor=IMUProcessor(frequency=200, core="VQF"),
-            filter_x=OneEuroFilter(
-                freq=200,
-                min_cutoff=self.config.filter_min_cutoff,
-                beta=self.config.filter_beta,
-                d_cutoff=self.config.filter_d_cutoff,
-            ),
-            filter_y=OneEuroFilter(
-                freq=200,
-                min_cutoff=self.config.filter_min_cutoff,
-                beta=self.config.filter_beta,
-                d_cutoff=self.config.filter_d_cutoff,
-            ),
-        )
-
-    def process_imu(self, data: np.ndarray, event_ts: float) -> list[tuple[str, dict[str, Any], float]]:
-        state = self.state
-        timestamp_ms = event_ts * 1000.0
-        if state.imu_processor.pre_timestamp == 0:
-            state.imu_processor.init_quaternion_and_timestamp(data[:3], timestamp_ms)
-            return []
-
-        state.imu_processor.update_attitude_by_data(data[3:], data[:3], timestamp=timestamp_ms)
-        quaternion = np.asarray(state.imu_processor.quaternion, dtype=np.float64)
-        current_orientation = PyQuaternion(quaternion)
-        state.orientation_queue.append(current_orientation)
-        if len(state.orientation_queue) < state.orientation_queue.maxlen:
-            return []
-
-        delta_orientation = state.orientation_queue[0].inverse * current_orientation
-        delta_orientation = np.array(delta_orientation.yaw_pitch_roll, dtype=np.float64)
-        x_move, y_move = self._ring_to_world_motion(delta_orientation, current_orientation)
-        x_move *= self.config.pointer_scale
-        y_move *= self.config.pointer_scale
-        vx = float(state.filter_x.filter(x_move))
-        vy = float(state.filter_y.filter(y_move))
-        state.orientation_queue.clear()
-        state.orientation_queue.append(current_orientation)
-
-        now = time.perf_counter()
-        if now - state.last_move_emit_time < self.config.move_emit_interval_seconds:
-            return []
-        if abs(vx) < self.config.min_move_abs and abs(vy) < self.config.min_move_abs:
-            return []
-
-        state.last_move_emit_time = now
-        return [("move", {"move_x": vx, "move_y": vy}, event_ts)]
-
-    def _ring_to_world_motion(
-        self,
-        delta_orientation: np.ndarray,
-        current_orientation: object,
-    ) -> tuple[float, float]:
-        ring_yaw_change, ring_pitch_change, _ring_roll_change = delta_orientation
-        rotated_y = current_orientation.rotate(np.array([0.0, 1.0, 0.0]))
-        rotated_z = current_orientation.rotate(np.array([0.0, 0.0, 1.0]))
-        x_move = ring_yaw_change * rotated_z[2] + ring_pitch_change * rotated_y[2]
-        y_move = ring_yaw_change * rotated_y[2] - ring_pitch_change * rotated_z[2]
-        return -float(x_move), -float(y_move)
-
-
 class RecognizerRuntimeBase:
     def __init__(self, name: str, bus: RecognizerBus, *, ring_role: str):
         self.name = name
@@ -1542,6 +1131,7 @@ class ThreadedMotionRuntime(RecognizerRuntimeBase):
         with self._condition:
             self.pending.append(
                 PendingImuReading(
+                    address=address,
                     data=np.asarray(data, dtype=np.float32),
                     event_ts=event_ts,
                     generation=self._generation,
@@ -1587,7 +1177,7 @@ class ThreadedMotionRuntime(RecognizerRuntimeBase):
                 continue
 
             try:
-                events = self.engine.process_imu(reading.data, reading.event_ts)
+                events = self.engine.process_imu(reading.address, reading.data, reading.event_ts)
             except Exception as exc:
                 self._set_status(f"运行失败: {exc}")
                 continue
@@ -1602,7 +1192,10 @@ class ThreadedMotionRuntime(RecognizerRuntimeBase):
                 target = self.target
 
             self.rate_tracker.mark()
-            for event_name, data, event_ts in events:
+            for event in events:
+                event_name = event.name
+                data = dict(event.data)
+                event_ts = float(event.event_ts)
                 self.bus.recognizer_event.emit(self.name, event_name, target, data, event_ts)
                 if event_name == "move":
                     self._set_status("持续输出位移")
@@ -1990,45 +1583,34 @@ class UnifiedGestureWindow(RingStreamWindowBase):
                 RECOGNIZER_SWIPE,
                 self.bus,
                 APP_CONFIG.swipe,
-                lambda: SwipeCNNRecognizer(
-                    APP_CONFIG.swipe.checkpoint_dir,
-                    device="cpu",
+                lambda: SWIPE_PRESET.build_recognizer(
                     backend=APP_CONFIG.swipe.backend,
+                    model_path=APP_CONFIG.swipe.checkpoint_dir,
                 ),
-                {
-                    1: "swipe-up",
-                    2: "swipe-down",
-                    3: "swipe-left",
-                    4: "swipe-right",
-                    5: "tap",
-                },
+                SWIPE_PRESET.event_map,
             ),
             RECOGNIZER_PINCH: WindowClassifierRuntime(
                 RECOGNIZER_PINCH,
                 self.bus,
                 APP_CONFIG.pinch,
-                lambda: PinchCNNRecognizer(
-                    APP_CONFIG.pinch.checkpoint_dir,
-                    device="cpu",
+                lambda: PINCH_PRESET.build_recognizer(
                     backend=APP_CONFIG.pinch.backend,
+                    model_path=APP_CONFIG.pinch.checkpoint_dir,
                 ),
-                {
-                    1: "pinch-down",
-                    2: "pinch-up",
-                },
+                PINCH_PRESET.event_map,
             ),
             RECOGNIZER_SNAP: SnapRuntime(self.bus, APP_CONFIG.snap),
             RECOGNIZER_TOUCHPAD: ThreadedMotionRuntime(
                 RECOGNIZER_TOUCHPAD,
                 self.bus,
                 ring_role="right",
-                engine_factory=lambda: TouchpadRecognizerEngine(APP_CONFIG.touchpad),
+                engine_factory=lambda: TouchpadEngine(APP_CONFIG.touchpad),
             ),
             RECOGNIZER_AIRMOUSE: ThreadedMotionRuntime(
                 RECOGNIZER_AIRMOUSE,
                 self.bus,
                 ring_role="right",
-                engine_factory=lambda: AirmouseRecognizerEngine(APP_CONFIG.airmouse),
+                engine_factory=lambda: AirmouseEngine(APP_CONFIG.airmouse),
             ),
             RECOGNIZER_TYPE: TypePlaceholderRuntime(self.bus),
             RECOGNIZER_AUDIO: AudioPlaceholderRuntime(self.bus),
@@ -2826,16 +2408,17 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=17888)
+    parser = create_base_parser()
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> int:
     args = parse_args()
-    app = QApplication(sys.argv)
-    app.setStyleSheet(STYLE_SHEET)
-    window = UnifiedGestureWindow(host=args.host, port=args.port)
-    window.show()
-    raise SystemExit(app.exec())
+    return run_window(
+        lambda: UnifiedGestureWindow(host=args.host, port=args.port),
+        style_sheet=STYLE_SHEET,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

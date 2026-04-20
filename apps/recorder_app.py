@@ -22,9 +22,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from common.file_saver import stash
-from common.stream_window import RingStreamWindowBase
-from common.ui_style import APP_STYLE_SHEET
+from apps.framework.bootstrap import create_base_parser, run_window
+from apps.framework.stream_window import RingStreamWindowBase
+from apps.framework.ui_style import APP_STYLE_SHEET
+from apps.shared.file_saver import stash
 
 STYLE_SHEET = APP_STYLE_SHEET
 
@@ -407,16 +408,17 @@ class RecorderWindow(RingStreamWindowBase):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=17888)
+    parser = create_base_parser()
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> int:
     args = parse_args()
-    app = QApplication(sys.argv)
-    app.setStyleSheet(STYLE_SHEET)
-    window = RecorderWindow(host=args.host, port=args.port)
-    window.show()
-    sys.exit(app.exec())
+    return run_window(
+        lambda: RecorderWindow(host=args.host, port=args.port),
+        style_sheet=STYLE_SHEET,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -5,7 +5,7 @@ from typing import Any
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QCheckBox, QLabel, QMainWindow, QScrollArea, QVBoxLayout, QWidget
 
-from common.stream_client import JsonLineStreamClient
+from .stream_client import JsonLineStreamClient
 
 NONE_SUBSCRIPTION = "__none__"
 

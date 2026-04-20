@@ -5,7 +5,6 @@ import html
 import multiprocessing as mp
 import os
 import queue
-import sys
 import time
 from collections import deque
 from dataclasses import asdict
@@ -27,26 +26,24 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-APP_ROOT = Path(__file__).resolve().parent.parent
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
-
-from common.stream_window import RingStreamWindowBase
-from common.ui_style import APP_STYLE_SHEET
-from typering_core.decoder.typering_decoder import TypeRingIMUDecoder
-from typering_core.decoder.typering_interface import TypeRingInterface
-
-from apps.typering_support.config import TypeRingConfig, TypeRingPaths
-from apps.typering_support.state import TypeRingEventLogEntry, TypeRingSessionState
-from apps.typering_support.worker import (
+from apps.features.typering import (
     MSG_ERROR,
     MSG_EVENT,
     MSG_IMU_FRAME,
     MSG_QUIT,
     MSG_READY,
     MSG_TOUCH_EVENT,
+    TypeRingConfig,
+    TypeRingEventLogEntry,
+    TypeRingPaths,
+    TypeRingSessionState,
     typering_worker_main,
 )
+from apps.framework.bootstrap import create_base_parser, run_window
+from apps.framework.stream_window import RingStreamWindowBase
+from apps.framework.ui_style import APP_STYLE_SHEET
+from typering_core.decoder.typering_decoder import TypeRingIMUDecoder
+from typering_core.decoder.typering_interface import TypeRingInterface
 
 TYPE_RING_EXTRA_STYLE_SHEET = """
 QMainWindow#typeRingWindow,
@@ -853,19 +850,20 @@ class TypeRingWindow(RingStreamWindowBase):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=17888)
+    parser = create_base_parser()
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> int:
     if sys.platform.startswith("darwin"):
         mp.set_start_method("spawn", force=True)
     args = parse_args()
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    app.setStyleSheet(STYLE_SHEET)
-    win = TypeRingWindow(host=args.host, port=args.port)
-    win.show()
-    sys.exit(app.exec())
+    return run_window(
+        lambda: TypeRingWindow(host=args.host, port=args.port),
+        style_sheet=STYLE_SHEET,
+        style="Fusion",
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
