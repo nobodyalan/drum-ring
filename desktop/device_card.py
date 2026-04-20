@@ -1,5 +1,6 @@
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -14,6 +15,7 @@ from .device_runtime import RingDevice
 
 class DeviceCard(QFrame):
     sig_action = pyqtSignal(str, str)
+    sig_swipe_toggled = pyqtSignal(str, bool)
 
     def __init__(self, device: RingDevice):
         super().__init__()
@@ -23,7 +25,7 @@ class DeviceCard(QFrame):
 
     def _build_ui(self) -> None:
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setFixedSize(360, 240)
+        self.setFixedSize(360, 300)
         layout = QVBoxLayout(self)
 
         title_row = QHBoxLayout()
@@ -77,6 +79,21 @@ class DeviceCard(QFrame):
         stat_row.addWidget(self.lbl_audio_fps)
         layout.addLayout(stat_row)
 
+        gesture_row = QHBoxLayout()
+        gesture_row.setSpacing(8)
+        self.lbl_gesture_fps = QLabel("识别：0.0Hz")
+        self.lbl_gesture_fps.setProperty("class", "stat-tag")
+        gesture_row.addWidget(self.lbl_gesture_fps)
+        gesture_row.addStretch()
+        layout.addLayout(gesture_row)
+
+        self.chk_swipe = QCheckBox("启用 Swipe 识别")
+        self.chk_swipe.setChecked(self.device.swipe_enabled)
+        self.chk_swipe.toggled.connect(
+            lambda enabled: self.sig_swipe_toggled.emit(self.device.address, enabled)
+        )
+        layout.addWidget(self.chk_swipe)
+
     def update_progress(self, current: int, total: int) -> None:
         if not self.progress_bar.isVisible():
             self.progress_bar.setVisible(True)
@@ -120,9 +137,14 @@ class DeviceCard(QFrame):
         battery_level = getattr(ring, "battery_level", -1) if ring is not None else -1
         imu_fps = float(getattr(ring, "imu_fps", 0.0)) if ring is not None else 0.0
         audio_fps = float(getattr(ring, "audio_fps", 0.0)) if ring is not None else 0.0
+        recognizer_fps = float(getattr(self.device, "recognizer_fps", 0.0))
         self.lbl_battery.setText(f"电量：{battery_level if battery_level > 0 else '--'}%")
         self.lbl_imu_fps.setText(f"IMU：{imu_fps:.1f}Hz")
         self.lbl_audio_fps.setText(f"音频：{audio_fps:.1f}Hz")
+        self.lbl_gesture_fps.setText(f"识别：{recognizer_fps:.1f}Hz")
+        self.chk_swipe.blockSignals(True)
+        self.chk_swipe.setChecked(self.device.swipe_enabled)
+        self.chk_swipe.blockSignals(False)
 
         self.style().unpolish(self)
         self.style().polish(self)

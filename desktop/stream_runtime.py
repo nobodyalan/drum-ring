@@ -71,3 +71,6 @@ class StreamRuntime:
 
     def publish_touch(self, **payload: Any) -> None:
         self.hub.publish_touch(**payload)
+
+    def publish_swipe(self, **payload: Any) -> None:
+        self.hub.publish_swipe(**payload)

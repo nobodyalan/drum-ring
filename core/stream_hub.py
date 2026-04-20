@@ -17,7 +17,7 @@ class RingInfo:
 @dataclass(eq=False)
 class ClientSession:
     writer: asyncio.StreamWriter
-    subscriptions: set[str] = field(default_factory=set)
+    subscriptions: set[str] | None = None
     stream_types: set[str] = field(default_factory=lambda: {"imu"})
     queue: asyncio.Queue[str] = field(default_factory=lambda: asyncio.Queue(maxsize=4096))
     writer_task: asyncio.Task | None = None
@@ -152,6 +152,40 @@ class ImuStreamHub:
                 continue
             self._enqueue_for_client(client, message)
 
+    def publish_swipe(
+        self,
+        *,
+        address: str,
+        name: str,
+        host_timestamp: float,
+        event: str,
+        class_id: int,
+        confidence: float,
+        probabilities: list[float] | tuple[float, ...] | None = None,
+        total_count: int | None = None,
+    ) -> None:
+        payload = {
+            "type": "swipe",
+            "address": address,
+            "name": name,
+            "timestamp": host_timestamp,
+            "host_timestamp": host_timestamp,
+            "event": event,
+            "class_id": int(class_id),
+            "confidence": float(confidence),
+        }
+        if probabilities is not None:
+            payload["probabilities"] = [float(value) for value in probabilities]
+        if total_count is not None:
+            payload["total_count"] = int(total_count)
+        message = json.dumps(payload, ensure_ascii=False)
+        for client in tuple(self._clients):
+            if "swipe" not in client.stream_types:
+                continue
+            if client.subscriptions is not None and address not in client.subscriptions:
+                continue
+            self._enqueue_for_client(client, message)
+
     async def _on_client(
         self,
         reader: asyncio.StreamReader,
@@ -195,9 +229,10 @@ class ImuStreamHub:
         if cmd == "subscribe":
             rings = command.get("rings")
             if isinstance(rings, list):
-                session.subscriptions = {str(x) for x in rings if str(x)}
+                subscriptions = {str(x) for x in rings if str(x)}
+                session.subscriptions = subscriptions or None
             else:
-                session.subscriptions = set()
+                session.subscriptions = None
             streams = command.get("streams")
             if isinstance(streams, list):
                 stream_types = {str(x) for x in streams if str(x)}
@@ -209,7 +244,7 @@ class ImuStreamHub:
                 json.dumps(
                     {
                         "type": "subscribed",
-                        "rings": sorted(session.subscriptions),
+                        "rings": [] if session.subscriptions is None else sorted(session.subscriptions),
                         "streams": sorted(session.stream_types),
                     }
                 ),

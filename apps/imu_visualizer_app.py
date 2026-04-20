@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -548,9 +549,14 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         self.audio_decoders: dict[str, AdpcmDecoder] = {}
         self.cards: dict[str, RingPlotCard] = {}
         self._subscription_applied = False
+        self._max_swipe_log_entries = 120
+        self.imu_message_count = 0
+        self.audio_message_count = 0
 
         self.status_label = QLabel("数据流状态：未连接")
         self.status_label.setObjectName("statusTag")
+        self.stream_counter_label = QLabel("流消息：IMU 0 | AUDIO 0")
+        self.stream_counter_label.setProperty("class", "sub-text")
 
         self._build_ui()
         self.set_stream_status_label(self.status_label)
@@ -579,13 +585,17 @@ class ImuVisualizerWindow(RingStreamWindowBase):
 
         title = QLabel("多戒指 IMU/音频实时可视化")
         title.setProperty("class", "title")
-        subtitle = QLabel("每个戒指卡片同时显示 IMU 曲线，并在有音频流时绘制低开销的音频能量视图。")
+        subtitle = QLabel(
+            "每个戒指卡片同时显示 IMU 曲线，并在有音频流时绘制低开销的音频能量视图；"
+            "收到 Swipe 手势事件时会显示在界面下方事件列表。"
+        )
         subtitle.setProperty("class", "sub-text")
         subtitle.setWordWrap(True)
 
         top_layout.addWidget(title)
         top_layout.addWidget(subtitle)
         top_layout.addWidget(self.status_label)
+        top_layout.addWidget(self.stream_counter_label)
 
         ring_scroll = self.add_ring_selection_panel(
             top_layout,
@@ -658,8 +668,13 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         self.cards_hint.setProperty("class", "sub-text")
         self.cards_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cards_hint.setWordWrap(True)
+        self.swipe_log = QListWidget()
+        self.swipe_log.setMaximumHeight(180)
+        self.swipe_log.setAlternatingRowColors(True)
         root.addWidget(self.cards_hint)
         root.addWidget(self.cards_scroll)
+        root.addWidget(QLabel("Swipe 事件"))
+        root.addWidget(self.swipe_log)
         self.cards_scroll.setVisible(False)
 
     def _bind_signals(self) -> None:
@@ -672,6 +687,8 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         self.bind_stream_client_signals()
 
     def on_stream_connected(self) -> None:
+        if self._subscription_applied:
+            self.apply_subscription()
         self._refresh_cards()
 
     def on_window_changed(self, value: int) -> None:
@@ -692,11 +709,21 @@ class ImuVisualizerWindow(RingStreamWindowBase):
 
     def handle_stream_message(self, message: dict) -> None:
         msg_type = message.get("type")
+        if msg_type == "subscribed":
+            self.status_label.setText(
+                "数据流状态：已连接"
+                + f" | rings={message.get('rings', [])}"
+                + f" | streams={message.get('streams', [])}"
+            )
+            return
         if msg_type == "imu":
             self._handle_imu_message(message)
             return
         if msg_type == "audio":
             self._handle_audio_message(message)
+            return
+        if msg_type == "swipe":
+            self._handle_swipe_message(message)
 
     def _handle_imu_message(self, message: dict) -> None:
         address = str(message.get("address", ""))
@@ -709,10 +736,11 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         if len(acc_raw) != 3 or len(gyr_raw) != 3:
             return
 
-        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
-        timestamp = self._resolve_event_timestamp(host_ts)
+        timestamp = self._plot_timestamp()
         acc = np.array(acc_raw, dtype=np.float32)
         gyr = np.array(gyr_raw, dtype=np.float32)
+        self.imu_message_count += 1
+        self._refresh_stream_counter()
 
         if address not in self.buffers:
             self.buffers[address] = RingBuffer()
@@ -724,7 +752,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
             return
 
         audio_type = int(message.get("audio_type", -1))
-        if audio_type != 1:
+        if audio_type not in (0, 1):
             return
 
         data_b64 = message.get("data_b64", "")
@@ -736,12 +764,13 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         except Exception:
             return
 
-        host_ts = float(message.get("host_timestamp", 0.0) or 0.0)
-        timestamp = self._resolve_event_timestamp(host_ts)
+        timestamp = self._plot_timestamp()
         decoder = self.audio_decoders.setdefault(address, AdpcmDecoder())
         pcm = decoder.decode_packet(raw_audio)
         if not pcm:
             return
+        self.audio_message_count += 1
+        self._refresh_stream_counter()
 
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
         if samples.size == 0:
@@ -754,6 +783,40 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         if address not in self.audio_buffers:
             self.audio_buffers[address] = AudioLevelBuffer()
         self.audio_buffers[address].append(timestamp, rms, peak)
+
+    def _handle_swipe_message(self, message: dict) -> None:
+        address = str(message.get("address", ""))
+        ring_name = str(message.get("name", "")).strip() or address or "Unknown"
+        event = str(message.get("event", "")).strip() or "unknown"
+        confidence = float(message.get("confidence", 0.0) or 0.0)
+        total_count = message.get("total_count")
+        count_text = "" if total_count is None else f" | total={int(total_count)}"
+        timestamp = self._resolve_event_timestamp(
+            float(message.get("host_timestamp", 0.0) or 0.0)
+        )
+        time_text = time.strftime("%H:%M:%S", time.localtime(timestamp))
+        self.swipe_log.insertItem(
+            0,
+            f"{time_text} | {ring_name} | {event} | confidence={confidence:.3f}{count_text}",
+        )
+        while self.swipe_log.count() > self._max_swipe_log_entries:
+            self.swipe_log.takeItem(self.swipe_log.count() - 1)
+
+    def _refresh_stream_counter(self) -> None:
+        self.stream_counter_label.setText(
+            f"流消息：IMU {self.imu_message_count} | AUDIO {self.audio_message_count}"
+        )
+        if (
+            self._subscription_applied
+            and self.cards_scroll.isVisible()
+            and not self.cards
+            and (self.imu_message_count > 0 or self.audio_message_count > 0)
+        ):
+            self.cards_hint.setText("正在收到数据，但当前没有可见卡片。请确认已勾选对应戒指并点击“应用订阅”。")
+            self.cards_hint.setVisible(True)
+
+    def _plot_timestamp(self) -> float:
+        return time.time()
 
     def _resolve_event_timestamp(self, host_ts: float) -> float:
         now = time.time()
@@ -830,7 +893,7 @@ class ImuVisualizerWindow(RingStreamWindowBase):
 
     def apply_subscription(self) -> None:
         self._subscription_applied = True
-        self.send_subscription(["imu", "audio"], empty_behavior="none")
+        self.send_subscription(["imu", "audio", "swipe"], empty_behavior="none")
         self._refresh_cards()
 
     def refresh_plots(self) -> None:

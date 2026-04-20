@@ -13,6 +13,7 @@ from core.ble_ring_v2 import BLERing
 
 from .device_card import DeviceCard
 from .device_runtime import DeviceService, RingDevice
+from .swipe_runtime import SwipeGestureEvent, SwipeRuntime
 from .stream_runtime import StreamMode, StreamRuntime
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,10 @@ class DeviceManager:
         self.on_card_action = on_card_action
         self.devices: dict[str, RingDevice] = {}
         self.cards: dict[str, DeviceCard] = {}
+        self.swipe_runtime = SwipeRuntime(
+            on_event=self.handle_swipe_event,
+            on_status=self.set_status,
+        )
 
     async def scan(self) -> None:
         scanned_list = await DeviceService.scan_ble()
@@ -90,8 +95,9 @@ class DeviceManager:
         if not device.is_connected:
             return
 
+        imu_enabled = bool(mode.enabled_imu or device.swipe_enabled)
         try:
-            if mode.enabled_imu:
+            if imu_enabled:
                 await DeviceService.open_imu(device)
             else:
                 await DeviceService.close_imu(device)
@@ -142,6 +148,8 @@ class DeviceManager:
             device.is_connected = ring_connected
             if not ring_connected:
                 device.is_calibrated = False
+                device.recognizer_fps = 0.0
+                self.swipe_runtime.reset_device(address)
                 self.set_status(f"{device.name} 已自动断开")
                 if (
                     ring is not None
@@ -156,6 +164,7 @@ class DeviceManager:
         device.is_calibrated = bool(
             ring is not None and getattr(ring, "is_time_calibrated", False)
         )
+        device.recognizer_fps = self.swipe_runtime.recognizer_fps(address)
 
         card = self.cards.get(address)
         if card is not None:
@@ -181,16 +190,34 @@ class DeviceManager:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self.swipe_runtime.shutdown()
 
     def publish_imu(self, address: str, imu) -> None:
         device = self.devices.get(address)
         if device is None:
             return
+        local_timestamp = float(getattr(imu, "local_timestamp", 0.0))
+        host_timestamp = float(getattr(imu, "host_timestamp", 0.0))
+        sample = [
+            float(imu.acc_x),
+            float(imu.acc_y),
+            float(imu.acc_z),
+            float(imu.gyr_x),
+            float(imu.gyr_y),
+            float(imu.gyr_z),
+        ]
+        event_timestamp = host_timestamp if host_timestamp > 0 else time.time()
+        self.swipe_runtime.handle_imu(
+            address=address,
+            ring_name=device.name,
+            sample=sample,
+            event_timestamp=event_timestamp,
+        )
         self.stream_runtime.publish_imu(
             address=address,
             name=device.name,
-            local_timestamp=float(getattr(imu, "local_timestamp", 0.0)),
-            host_timestamp=float(getattr(imu, "host_timestamp", 0.0)),
+            local_timestamp=local_timestamp,
+            host_timestamp=host_timestamp,
             acc_x=imu.acc_x,
             acc_y=imu.acc_y,
             acc_z=imu.acc_z,
@@ -246,6 +273,32 @@ class DeviceManager:
         if release_timestamp is not None and hasattr(ring, "clear_release_timestamp"):
             ring.clear_release_timestamp()
 
+    async def set_swipe_enabled(self, address: str, enabled: bool) -> None:
+        device = self.devices.get(address)
+        if device is None:
+            return
+        device.swipe_enabled = bool(enabled)
+        self.swipe_runtime.set_enabled(address, device.name, device.swipe_enabled)
+        if device.is_connected:
+            await self.apply_stream_mode_to_device(device=device, mode=self.get_stream_mode())
+        self.refresh_card(address)
+
+    def handle_swipe_event(self, event: SwipeGestureEvent) -> None:
+        device = self.devices.get(event.address)
+        if device is not None:
+            device.recognizer_fps = self.swipe_runtime.recognizer_fps(event.address)
+            self.refresh_card(event.address)
+        self.stream_runtime.publish_swipe(
+            address=event.address,
+            name=event.ring_name,
+            host_timestamp=event.timestamp,
+            event=event.event,
+            class_id=event.class_id,
+            confidence=event.confidence,
+            probabilities=list(event.probabilities),
+            total_count=event.total_count,
+        )
+
     def rings_snapshot(self) -> list[tuple[str, str, bool]]:
         return [
             (device.address, device.name, device.is_connected)
@@ -278,6 +331,11 @@ class DeviceManager:
     def _add_card(self, device: RingDevice) -> None:
         card = DeviceCard(device)
         card.sig_action.connect(self.on_card_action)
+        card.sig_swipe_toggled.connect(
+            lambda address, enabled, self=self: asyncio.create_task(
+                self.set_swipe_enabled(address, enabled)
+            )
+        )
         self.card_layout.addWidget(card)
         self.cards[device.address] = card
 
@@ -289,6 +347,7 @@ class DeviceManager:
             if device.is_connected:
                 continue
             self._remove_card(address)
+            self.swipe_runtime.remove_device(address)
             self.stream_runtime.remove_ring(address)
             del self.devices[address]
 

@@ -24,6 +24,8 @@ class RingDevice:
     is_connected: bool = False
     is_reconnecting: bool = False
     is_calibrated: bool = False
+    swipe_enabled: bool = False
+    recognizer_fps: float = 0.0
     ring_logic: BLERing | None = None
 
     def update_info(self, name: str) -> None:
