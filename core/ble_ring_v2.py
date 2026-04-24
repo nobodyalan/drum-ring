@@ -243,6 +243,7 @@ class BLERing:
         imu_callback=None,
         battery_callback=None,
         touch_callback=None,
+        gesture_callback=None,
         audio_callback=None,
         imu_int8_callback=None,
         update_view_callback=None,
@@ -261,6 +262,7 @@ class BLERing:
         self.imu_mode = False
         self.raw_imu_data = bytearray()
         self.touch_callback = touch_callback
+        self.gesture_callback = gesture_callback
         self.battery_callback = battery_callback
         self.imu_callback = imu_callback
         self.audio_callback = audio_callback
@@ -481,13 +483,9 @@ class BLERing:
         elif data[2] == 0x61 and data[3] == 0x2:
             if data[4] in (0, 1):
                 self.tap_timestamp = time.perf_counter()
-                if self.touch_callback is not None:
-                    self.touch_callback(self.index, 0)
             elif data[4] == 5:
                 self.release_timestamp = time.perf_counter()
-                if self.touch_callback is not None:
-                    self.touch_callback(self.index, 5)
-            elif self.touch_callback is not None:
+            if self.touch_callback is not None:
                 self.touch_callback(self.index, data[4])
 
         elif data[2] == 0x12 and data[3] == 0x0:
@@ -539,6 +537,12 @@ class BLERing:
         elif data[2] == 0x97 and data[3] == 0x0:
             gesture_code = data[4]
             print(f"Ring {self.index} gesture code: {gesture_code}")
+            if self.gesture_callback is not None:
+                self.gesture_callback(
+                    self.index,
+                    gesture_code,
+                    time.time(),
+                )
 
         elif data[2] == 0x97 and data[3] == 0x01:
             packet_size = len(data[4:])  # should be multiple of 6

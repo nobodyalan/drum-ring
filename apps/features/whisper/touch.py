@@ -162,7 +162,7 @@ class WhisperInferenceWorker(QThread):
 class WhisperTouchWindowBase(RingStreamWindowBase):
     """Base window that only manages capture flow and delegates model specifics to spec/runtime."""
 
-    TOUCH_DOWN_CODES = {2}
+    TOUCH_DOWN_CODES = {1}
     TOUCH_RELEASE_CODES = {5}
 
     def __init__(
