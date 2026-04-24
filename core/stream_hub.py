@@ -163,6 +163,7 @@ class ImuStreamHub:
         confidence: float,
         probabilities: list[float] | tuple[float, ...] | None = None,
         total_count: int | None = None,
+        source: str | None = None,
     ) -> None:
         payload = {
             "type": "swipe",
@@ -178,6 +179,8 @@ class ImuStreamHub:
             payload["probabilities"] = [float(value) for value in probabilities]
         if total_count is not None:
             payload["total_count"] = int(total_count)
+        if source:
+            payload["source"] = str(source)
         message = json.dumps(payload, ensure_ascii=False)
         for client in tuple(self._clients):
             if "swipe" not in client.stream_types:

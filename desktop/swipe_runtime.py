@@ -13,7 +13,7 @@ import numpy as np
 from apps.features.window_classifier.swipe import SWIPE_SPEC, build_swipe_recognizer
 
 IMU_SAMPLE_RATE_HZ = 200.0
-SWIPE_BACKEND = "pytorch"
+SWIPE_BACKEND = "openvino"
 
 
 @dataclass(frozen=True, slots=True)

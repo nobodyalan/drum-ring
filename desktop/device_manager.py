@@ -10,13 +10,20 @@ from collections.abc import Callable
 from PyQt6.QtWidgets import QHBoxLayout
 
 from core.ble_ring_v2 import BLERing
-
 from .device_card import DeviceCard
 from .device_runtime import DeviceService, RingDevice
 from .swipe_runtime import SwipeGestureEvent, SwipeRuntime
 from .stream_runtime import StreamMode, StreamRuntime
 
 logger = logging.getLogger(__name__)
+
+HARDWARE_SWIPE_EVENTS = {
+    1: "swipe-up",
+    2: "swipe-down",
+    3: "swipe-left",
+    4: "swipe-right",
+    5: "tap",
+}
 
 
 class DeviceManager:
@@ -299,6 +306,32 @@ class DeviceManager:
             total_count=event.total_count,
         )
 
+    def publish_hardware_gesture(
+        self,
+        address: str,
+        gesture_code: int,
+        host_timestamp: float,
+    ) -> None:
+        device = self.devices.get(address)
+        if device is None:
+            return
+        class_id = int(gesture_code)
+        event = HARDWARE_SWIPE_EVENTS.get(class_id)
+        if event is None:
+            logger.debug("Ignoring unsupported hardware swipe code %s from %s", class_id, address)
+            return
+        self.stream_runtime.publish_swipe(
+            address=address,
+            name=device.name,
+            host_timestamp=host_timestamp,
+            event=event,
+            class_id=class_id,
+            confidence=1.0,
+            probabilities=None,
+            total_count=None,
+            source="hardware",
+        )
+
     def rings_snapshot(self) -> list[tuple[str, str, bool]]:
         return [
             (device.address, device.name, device.is_connected)
@@ -316,6 +349,9 @@ class DeviceManager:
             ),
             touch_callback=lambda _, action_code, ring_address=address: self.publish_touch(
                 ring_address, action_code
+            ),
+            gesture_callback=lambda _, gesture_code, host_ts, ring_address=address: self.publish_hardware_gesture(
+                ring_address, gesture_code, host_ts
             ),
             audio_callback=lambda _, audio_type, audio, local_ts, host_ts, ring_address=address: self.publish_audio(
                 ring_address, audio_type, audio, local_ts, host_ts

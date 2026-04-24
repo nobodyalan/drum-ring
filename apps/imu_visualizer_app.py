@@ -789,15 +789,17 @@ class ImuVisualizerWindow(RingStreamWindowBase):
         ring_name = str(message.get("name", "")).strip() or address or "Unknown"
         event = str(message.get("event", "")).strip() or "unknown"
         confidence = float(message.get("confidence", 0.0) or 0.0)
+        source = str(message.get("source", "")).strip()
         total_count = message.get("total_count")
         count_text = "" if total_count is None else f" | total={int(total_count)}"
+        source_text = "" if not source else f" | source={source}"
         timestamp = self._resolve_event_timestamp(
             float(message.get("host_timestamp", 0.0) or 0.0)
         )
         time_text = time.strftime("%H:%M:%S", time.localtime(timestamp))
         self.swipe_log.insertItem(
             0,
-            f"{time_text} | {ring_name} | {event} | confidence={confidence:.3f}{count_text}",
+            f"{time_text} | {ring_name} | {event} | confidence={confidence:.3f}{source_text}{count_text}",
         )
         while self.swipe_log.count() > self._max_swipe_log_entries:
             self.swipe_log.takeItem(self.swipe_log.count() - 1)

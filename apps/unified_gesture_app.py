@@ -1539,6 +1539,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.pinch_airmouse_cursor_checkbox.setChecked(False)
         self.macos_keepalive_checkbox = QCheckBox("macOS 后台保活")
         self.macos_keepalive_checkbox.setChecked(True)
+        self.hardware_swipe_checkbox = QCheckBox("Swipe 使用硬件识别结果")
+        self.hardware_swipe_checkbox.setChecked(False)
 
         self.btn_subscribe = QPushButton("订阅")
         self.btn_subscribe.setProperty("class", "btn-primary")
@@ -1553,6 +1555,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
         self.recognizer_rows: dict[str, RecognizerRowWidgets] = {}
         self.pinch_airmouse_move_active = False
+        self.hardware_swipe_active = False
         self.local_cursor_controller = LocalCursorController()
         self.macos_keepalive = MacOSKeepAliveManager("Unified Gesture 后台识别保活")
         self.runtimes = self._build_runtimes()
@@ -1724,6 +1727,8 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             grid.addWidget(status_label, row_index, 3)
 
         recognizer_layout.addLayout(grid)
+        self.hardware_swipe_checkbox.setToolTip("开启后，Swipe 不启动本地模型推理，只接收戒指硬件上报的 Swipe 事件")
+        recognizer_layout.addWidget(self.hardware_swipe_checkbox)
         root.addWidget(recognizer_panel)
 
         message_panel = QFrame()
@@ -1748,6 +1753,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.touchpad_cursor_checkbox.toggled.connect(self.on_touchpad_cursor_toggled)
         self.pinch_airmouse_cursor_checkbox.toggled.connect(self.on_pinch_airmouse_cursor_toggled)
         self.macos_keepalive_checkbox.toggled.connect(self.on_macos_keepalive_toggled)
+        self.hardware_swipe_checkbox.toggled.connect(self.on_hardware_swipe_toggled)
 
     def on_connected_changed(self, connected: bool) -> None:
         self.stream_connected = connected
@@ -1788,6 +1794,10 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             self.runtimes[RECOGNIZER_AUDIO].handle_audio(message)
             return
 
+        if message_type == "swipe":
+            self.handle_hardware_swipe_message(message)
+            return
+
         if message_type != "imu":
             return
 
@@ -1824,6 +1834,43 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             if not runtime.accepts_stream_seq(stream_seq):
                 continue
             runtime.handle_imu(address, data, event_ts)
+
+    def handle_hardware_swipe_message(self, message: dict[str, Any]) -> None:
+        if str(message.get("source", "")).strip() != "hardware":
+            return
+        if not self.hardware_swipe_active:
+            return
+        right_ring = self.selected_ring("right")
+        if right_ring is None:
+            return
+        address = str(message.get("address", ""))
+        if address != right_ring.address:
+            return
+        event_name = str(message.get("event", "")).strip()
+        if not event_name:
+            return
+        event_ts = float(message.get("host_timestamp", 0.0) or 0.0) or time.time()
+        data: dict[str, Any] = {
+            "class_id": int(message.get("class_id", -1)),
+            "label": event_name,
+            "confidence": float(message.get("confidence", 1.0)),
+            "source": str(message.get("source", "hardware") or "hardware"),
+        }
+        probabilities = message.get("probabilities")
+        if isinstance(probabilities, list):
+            data["probabilities"] = list(probabilities)
+        payload = build_recognizer_event(
+            RecognizerEventMessage(
+                recognizer=RECOGNIZER_SWIPE,
+                event=event_name,
+                timestamp=event_ts,
+                data=data,
+                sequence=self._next_sequence(),
+            )
+        )
+        self._publish_logged_payload(payload)
+        if event_name == "tap":
+            self._toggle_voice_input_from_swipe_tap(event_ts)
 
     def on_rings_updated(
         self,
@@ -1878,6 +1925,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self.apply_recognizer_selection()
 
     def apply_recognizer_selection(self) -> None:
+        self.hardware_swipe_active = False
         validation_error = self.validate_ring_selection(require_right_for_active=True)
         if validation_error is not None:
             self.subscription_status_label.setText(validation_error)
@@ -1893,6 +1941,11 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
         for recognizer, runtime in self.runtimes.items():
             if self.recognizer_rows[recognizer].checkbox.isChecked():
+                if recognizer == RECOGNIZER_SWIPE and self.hardware_swipe_checkbox.isChecked():
+                    runtime.deactivate()
+                    self.hardware_swipe_active = True
+                    runtime._set_status("硬件 Swipe 转发已启用")
+                    continue
                 runtime.activate(left_ring, right_ring, min_stream_seq=min_stream_seq)
             else:
                 runtime.deactivate()
@@ -1904,6 +1957,7 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         self._cancel_voice_input_if_needed(timestamp=time.time())
         self._request_main_audio_stream(False)
         self.pinch_airmouse_move_active = False
+        self.hardware_swipe_active = False
         for runtime in self.runtimes.values():
             runtime.deactivate()
         self.publish_runtime_status()
@@ -1948,6 +2002,9 @@ class UnifiedGestureWindow(RingStreamWindowBase):
             row = self.recognizer_rows[recognizer]
             row.fps_label.setText(f"{runtime.current_fps():.1f} Hz")
             row.status_label.setText(runtime.status_text)
+        if self.hardware_swipe_active:
+            self.recognizer_rows[RECOGNIZER_SWIPE].fps_label.setText("0.0 Hz")
+            self.recognizer_rows[RECOGNIZER_SWIPE].status_label.setText("硬件 Swipe 转发已启用")
         self.refresh_websocket_status()
 
     def refresh_websocket_status(self) -> None:
@@ -2065,6 +2122,13 @@ class UnifiedGestureWindow(RingStreamWindowBase):
         else:
             self.pinch_airmouse_move_active = False
         self.publish_runtime_status()
+
+    def on_hardware_swipe_toggled(self, checked: bool) -> None:
+        _ = checked
+        if self.recognizer_rows[RECOGNIZER_SWIPE].checkbox.isChecked():
+            self.apply_recognizer_selection()
+        else:
+            self.apply_subscription()
 
     def _configure_macos_keepalive_ui(self) -> None:
         if not self.macos_keepalive.available:
@@ -2294,9 +2358,17 @@ class UnifiedGestureWindow(RingStreamWindowBase):
 
     def current_streams(self) -> list[str]:
         streams = ["imu"]
+        if self._hardware_swipe_requested():
+            streams.append("swipe")
         if self.recognizer_rows[RECOGNIZER_AUDIO].checkbox.isChecked():
             streams.append("audio")
         return streams
+
+    def _hardware_swipe_requested(self) -> bool:
+        return (
+            self.hardware_swipe_checkbox.isChecked()
+            and self.recognizer_rows[RECOGNIZER_SWIPE].checkbox.isChecked()
+        )
 
     def checked_recognizers(self) -> list[str]:
         return [
