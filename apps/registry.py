@@ -22,6 +22,7 @@ APP_LAUNCH_SPECS: tuple[AppLaunchSpec, ...] = (
     AppLaunchSpec("unified_gesture", "综合识别", "apps/unified_gesture_app.py", "apps.unified_gesture_app"),
     AppLaunchSpec("whisper_number", "数字书写识别", "apps/whisper_number_touch_app.py", "apps.whisper_number_touch_app"),
     AppLaunchSpec("whisper_word", "英文小写识别", "apps/whisper_word_touch_app.py", "apps.whisper_word_touch_app"),
+    AppLaunchSpec("handwriting_experiment", "手写识别实验", "apps/handwriting_experiment_app.py", "apps.handwriting_experiment_app"),
     AppLaunchSpec("swipe", "Swipe 检测", "apps/swipe_realtime_app.py", "apps.swipe_realtime_app"),
     AppLaunchSpec("pinch", "Pinch 检测", "apps/pinch_realtime_app.py", "apps.pinch_realtime_app"),
     AppLaunchSpec("snake", "Snake", "apps/snake_app.py", "apps.snake_app"),
