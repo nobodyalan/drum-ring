@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,12 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - surfaced as runtime error by c
     yaml = None
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-FINGERSCRIBE_TRAIN_ROOT = PROJECT_ROOT / "FingerScribe" / "train"
-if str(FINGERSCRIBE_TRAIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(FINGERSCRIBE_TRAIN_ROOT))
-
-from modules.whisper_pretrain import (  # noqa: E402
+from whisper.whisper_pretrain import (
     SPECIAL_END_ID,
     SPECIAL_PAD_ID,
     SPECIAL_START_ID,
