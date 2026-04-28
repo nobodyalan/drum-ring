@@ -1,43 +1,59 @@
 import argparse
 from pathlib import Path
 
-from apps.features.whisper.touch import WhisperTouchAppSpec, WhisperTouchWindowBase
+from apps.features.whisper.touch import tr, WhisperTouchAppSpec, WhisperTouchModeSpec, WhisperTouchWindowBase
 from apps.framework.bootstrap import create_base_parser, run_window
 from apps.framework.ui_style import APP_STYLE_SHEET
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from whisper.whisper_number_recognizer import WhisperNumberRecognizer
+    from whisper.whisper_with_pretrain_recognizer import WhisperWithPretrainRecognizer
 
     HAS_WHISPER_RUNTIME = True
     WHISPER_RUNTIME_ERROR = ""
 except Exception as exc:
-    WhisperNumberRecognizer = None
+    WhisperWithPretrainRecognizer = None
     HAS_WHISPER_RUNTIME = False
     WHISPER_RUNTIME_ERROR = str(exc)
 
 
 STYLE_SHEET = APP_STYLE_SHEET
 APP_SPEC = WhisperTouchAppSpec(
-    window_title="触摸数字书写识别",
-    title="触摸数字书写识别",
-    description="按下触摸按键开始缓存 IMU，松开时触发一次 CPU 推理，模型来自 checkpoint/whisper-number。",
-    model_label="checkpoint/whisper-number",
-    checkpoint_dir=PROJECT_ROOT / "checkpoint" / "whisper-number",
+    window_title=tr("app_window_title"),
+    title=tr("app_title"),
+    description=tr("app_description"),
+    modes=(
+        WhisperTouchModeSpec(
+            key="number",
+            label=tr("mode_number"),
+            model_label="checkpoint/whisper-number-exp",
+            checkpoint_dir=PROJECT_ROOT / "checkpoint" / "whisper-number-exp",
+        ),
+        WhisperTouchModeSpec(
+            key="lowercase",
+            label=tr("mode_lowercase"),
+            model_label="checkpoint/whisper-word-exp",
+            checkpoint_dir=PROJECT_ROOT / "checkpoint" / "whisper-word-exp",
+        ),
+    ),
+    default_mode_key="number",
 )
 
 
-class WhisperNumberTouchWindow(WhisperTouchWindowBase):
+class WhisperWritingTouchWindow(WhisperTouchWindowBase):
     def __init__(self, host: str, port: int):
         super().__init__(
             host=host,
             port=port,
             spec=APP_SPEC,
-            recognizer_cls=WhisperNumberRecognizer,
+            recognizer_cls=WhisperWithPretrainRecognizer,
             runtime_available=HAS_WHISPER_RUNTIME,
             runtime_error=WHISPER_RUNTIME_ERROR,
         )
+
+
+WhisperNumberTouchWindow = WhisperWritingTouchWindow
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +64,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     return run_window(
-        lambda: WhisperNumberTouchWindow(host=args.host, port=args.port),
+        lambda: WhisperWritingTouchWindow(host=args.host, port=args.port),
         style_sheet=STYLE_SHEET,
     )
 

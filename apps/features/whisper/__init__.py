@@ -1,3 +1,3 @@
-from .touch import WhisperTouchAppSpec, WhisperTouchWindowBase
+from .touch import WhisperTouchAppSpec, WhisperTouchModeSpec, WhisperTouchWindowBase
 
-__all__ = ["WhisperTouchAppSpec", "WhisperTouchWindowBase"]
+__all__ = ["WhisperTouchAppSpec", "WhisperTouchModeSpec", "WhisperTouchWindowBase"]

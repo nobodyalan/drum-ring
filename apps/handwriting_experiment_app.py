@@ -33,7 +33,155 @@ from whisper.whisper_with_pretrain_recognizer import WhisperWithPretrainRecogniz
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SURFACES = ("桌面", "手心", "大腿", "上衣口袋", "空中")
+
+# Change this single value to switch the experiment UI language: "en" or "zh".
+UI_LANGUAGE = "en"
+
+SURFACES_BY_LANGUAGE = {
+    "en": ("Desk", "Palm", "Thigh", "Chest pocket", "Air"),
+    "zh": ("桌面", "手心", "大腿", "上衣口袋", "空中"),
+}
+
+UI_TEXT = {
+    "en": {
+        "window_title": "Handwriting Experiment",
+        "stream_disconnected": "Stream: disconnected",
+        "stream_connected": "Stream: connected",
+        "stream_error": "Stream: error ({message})",
+        "status_initial": "Ready",
+        "phase_wait_initial": "Waiting",
+        "capture_none": "Capture: none",
+        "last_result_none": "Last result: none",
+        "result_title": "Result",
+        "experiment": "Experiment",
+        "user_id": "User ID",
+        "output_dir": "Output",
+        "rebuild": "New session",
+        "apply_subscription": "Apply rings",
+        "ring_selection": "Rings",
+        "exp1_title": "Experiment 1: characters",
+        "exp2_title": "Experiment 2: baseline recognition",
+        "exp3_title": "Experiment 3: personalized recognition",
+        "load_number_model": "Loading number model",
+        "load_word_model": "Loading word model",
+        "model_load_failed": "Model load failed: {error}",
+        "model_ready": "Model ready",
+        "loading_models": "Loading models",
+        "capture_mode": "Capture mode",
+        "session_ready_log": "New {title}: {count} trials",
+        "subscribed": "Subscribed to IMU",
+        "cancelled": "Capture cancelled",
+        "retake": "Retake",
+        "capture_waiting": "Capture: waiting for IMU | 0 frames | 0.00 s",
+        "recording": "Recording",
+        "no_imu": "No IMU samples",
+        "last_capture": "Last capture: {samples} frames | {seconds:.2f} s",
+        "saved_log": "{content} / {surface} -> saved {samples} frames",
+        "inferring": "Recognizing",
+        "target_frames": "Target: {target} | {samples} frames",
+        "model_unavailable": "Model unavailable",
+        "saved_inferring": "Saved, recognizing",
+        "result_empty": "(empty)",
+        "inference_failed": "Recognition failed",
+        "result_meta": "Target: {target} | Edit: {edit_distance} | Confidence: {confidence:.3f} | Time: {elapsed_ms:.1f} ms{error_text}",
+        "result_error": " | Error: {error}",
+        "result_log": "{content} / {surface} -> {result} | edit={edit_distance}",
+        "review_done": "Done",
+        "done": "Complete",
+        "all_done": "All trials complete",
+        "experiment_done": "Complete",
+        "current_surface": "Surface: {surface} (surface_id={surface_id})",
+        "start_surface": "Start on: {surface}",
+        "same_surface": "Stay on: {surface}",
+        "switch_surface": "Switch surface: {previous} -> {current}",
+        "capture_live": "Capture: {ring_name} | {samples} frames | {elapsed:.2f} s",
+        "waiting_imu": "Waiting for IMU",
+        "phase_recording": "RECORDING",
+        "phase_inference": "Recognizing",
+        "phase_done": "Complete",
+        "phase_review": "WAITING",
+        "phase_ready": "WAITING",
+        "phase_ready_short": "Waiting",
+        "phase_recording_short": "Recording",
+        "phase_inference_short": "Recognizing",
+        "phase_review_short": "Review",
+        "phase_done_short": "Complete",
+        "ring_online": "online",
+        "ring_offline": "offline",
+    },
+    "zh": {
+        "window_title": "手写识别实验系统",
+        "stream_disconnected": "数据流状态：未连接",
+        "stream_connected": "数据流状态：已连接",
+        "stream_error": "数据流状态：异常（{message}）",
+        "status_initial": "状态：准备启动",
+        "phase_wait_initial": "等待开始：按空格开始",
+        "capture_none": "当前录制：无",
+        "last_result_none": "最近结果：无",
+        "result_title": "识别结果",
+        "experiment": "实验",
+        "user_id": "用户 ID",
+        "output_dir": "输出目录",
+        "rebuild": "新建 / 重建实验",
+        "apply_subscription": "应用订阅",
+        "ring_selection": "选择订阅戒指",
+        "exp1_title": "实验 1：单字母 / 单数字采集",
+        "exp2_title": "实验 2：单词 / 数字串基线识别",
+        "exp3_title": "实验 3：单词 / 数字串用户微调识别",
+        "load_number_model": "状态：正在加载数字串模型",
+        "load_word_model": "状态：正在加载单词模型",
+        "model_load_failed": "模型加载失败：{error}",
+        "model_ready": "状态：模型已就绪",
+        "loading_models": "状态：正在加载模型",
+        "capture_mode": "状态：采集模式",
+        "session_ready_log": "重建 {title}，共 {count} 条",
+        "subscribed": "状态：已订阅 IMU",
+        "cancelled": "状态：当前录制已取消",
+        "retake": "状态：已退回，等待重新书写",
+        "capture_waiting": "当前录制：等待 IMU | 0 帧 | 0.00 s",
+        "recording": "状态：正在录制",
+        "no_imu": "状态：没有采到 IMU",
+        "last_capture": "最近录制：{samples} 帧 | {seconds:.2f} s",
+        "saved_log": "{content} / {surface} -> 保存 {samples} 帧",
+        "inferring": "推理中",
+        "target_frames": "目标：{target} | {samples} 帧",
+        "model_unavailable": "模型不可用",
+        "saved_inferring": "状态：已保存原始数据，正在推理",
+        "result_empty": "(空)",
+        "inference_failed": "推理失败",
+        "result_meta": "目标：{target} | 编辑距离：{edit_distance} | 置信度：{confidence:.3f} | 推理：{elapsed_ms:.1f} ms{error_text}",
+        "result_error": " | 错误：{error}",
+        "result_log": "{content} / {surface} -> {result} | edit={edit_distance}",
+        "review_done": "状态：推理完成",
+        "done": "完成",
+        "all_done": "所有内容已完成",
+        "experiment_done": "状态：实验完成",
+        "current_surface": "当前书写平面：{surface}（surface_id={surface_id}）",
+        "start_surface": "开始前请确认：现在写在【{surface}】上",
+        "same_surface": "继续保持在【{surface}】上书写",
+        "switch_surface": "请先切换书写平面：从【{previous}】换到【{current}】",
+        "capture_live": "当前录制：{ring_name} | {samples} 帧 | {elapsed:.2f} s",
+        "waiting_imu": "等待 IMU",
+        "phase_recording": "正在书写 / 录制中",
+        "phase_inference": "已结束书写：正在识别，请等待",
+        "phase_done": "实验已完成",
+        "phase_review": "等待进入下一条",
+        "phase_ready": "等待开始",
+        "phase_ready_short": "等待空格开始",
+        "phase_recording_short": "录制中",
+        "phase_inference_short": "推理中",
+        "phase_review_short": "等待空格进入下一条",
+        "phase_done_short": "已完成",
+        "ring_online": "在线",
+        "ring_offline": "离线",
+    },
+}
+
+if UI_LANGUAGE not in UI_TEXT:
+    raise ValueError(f"Unsupported UI_LANGUAGE: {UI_LANGUAGE!r}")
+
+SURFACES = SURFACES_BY_LANGUAGE[UI_LANGUAGE]
+RECORDED_SURFACES = SURFACES_BY_LANGUAGE["zh"]
 SPEED_ID = 0
 
 EXP1_LETTERS = tuple(string.ascii_lowercase)
@@ -55,16 +203,29 @@ DATASET_BY_KIND = {
 @dataclass(frozen=True)
 class ExperimentSpec:
     key: str
-    title: str
+    title_key: str
     needs_inference: bool
     finetuned: bool = False
 
 
 EXPERIMENTS: tuple[ExperimentSpec, ...] = (
-    ExperimentSpec("exp1", "实验 1：单字母 / 单数字采集", needs_inference=False),
-    ExperimentSpec("exp2", "实验 2：单词 / 数字串基线识别", needs_inference=True),
-    ExperimentSpec("exp3", "实验 3：单词 / 数字串用户微调识别", needs_inference=True, finetuned=True),
+    ExperimentSpec("exp1", "exp1_title", needs_inference=False),
+    ExperimentSpec("exp2", "exp2_title", needs_inference=True),
+    ExperimentSpec("exp3", "exp3_title", needs_inference=True, finetuned=True),
 )
+
+
+def tr(key: str, **kwargs: Any) -> str:
+    text = UI_TEXT[UI_LANGUAGE][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def experiment_title(spec: ExperimentSpec) -> str:
+    return tr(spec.title_key)
+
+
+def surface_name(surface_id: int) -> str:
+    return SURFACES[int(surface_id)]
 
 
 @dataclass(frozen=True)
@@ -263,24 +424,24 @@ class ExperimentInferenceWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.status_changed.emit("状态：正在加载数字串模型")
+            self.status_changed.emit(tr("load_number_model"))
             number_recognizer = WhisperWithPretrainRecognizer(
                 self.number_source.config_dir,
                 device="cpu",
                 checkpoint_path=self.number_source.checkpoint_path,
             )
-            self.status_changed.emit("状态：正在加载单词模型")
+            self.status_changed.emit(tr("load_word_model"))
             word_recognizer = WhisperWithPretrainRecognizer(
                 self.word_source.config_dir,
                 device="cpu",
                 checkpoint_path=self.word_source.checkpoint_path,
             )
         except Exception as exc:
-            self.fatal_error.emit(f"模型加载失败：{exc}")
+            self.fatal_error.emit(tr("model_load_failed", error=exc))
             return
 
         self.ready.emit()
-        self.status_changed.emit("状态：模型已就绪")
+        self.status_changed.emit(tr("model_ready"))
         while not self._stopping:
             try:
                 job = self._jobs.get(timeout=0.05)
@@ -343,17 +504,17 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         self.runtime_failed = False
         self.data_store: ExperimentDataStore | None = None
 
-        self.setWindowTitle("手写识别实验系统")
+        self.setWindowTitle(tr("window_title"))
         self.resize(1180, 780)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        self.stream_status_label = QLabel("数据流状态：未连接")
+        self.stream_status_label = QLabel(tr("stream_disconnected"))
         self.stream_status_label.setObjectName("statusTag")
-        self.workflow_label = QLabel("状态：准备启动")
+        self.workflow_label = QLabel(tr("status_initial"))
         self.workflow_label.setWordWrap(True)
         self.phase_dot = QFrame()
         self.phase_dot.setFixedSize(24, 24)
-        self.phase_state_label = QLabel("等待开始：按空格开始")
+        self.phase_state_label = QLabel(tr("phase_wait_initial"))
         self.phase_state_label.setWordWrap(True)
         self.phase_state_label.setStyleSheet("font-size: 24px; font-weight: 900; color: #233142;")
         self.prompt_label = QLabel("--")
@@ -373,12 +534,12 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         )
         self.progress_label = QLabel("--")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.capture_label = QLabel("当前录制：无")
+        self.capture_label = QLabel(tr("capture_none"))
         self.result_label = QLabel("--")
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.result_label.setStyleSheet("font-size: 42px; font-weight: 800; color: #2f3e52;")
-        self.result_meta_label = QLabel("最近结果：无")
+        self.result_meta_label = QLabel(tr("last_result_none"))
         self.result_meta_label.setWordWrap(True)
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
@@ -386,7 +547,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
 
         self.experiment_combo = QComboBox()
         for spec in EXPERIMENTS:
-            self.experiment_combo.addItem(spec.title, spec.key)
+            self.experiment_combo.addItem(experiment_title(spec), spec.key)
         self.user_id_spin = QSpinBox()
         self.user_id_spin.setRange(0, 10000)
         self.user_id_spin.setValue(0)
@@ -416,32 +577,32 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         left_layout.setContentsMargins(14, 14, 14, 14)
         left_layout.setSpacing(10)
 
-        title = QLabel("手写识别实验系统")
+        title = QLabel(tr("window_title"))
         title.setProperty("class", "title")
         left_layout.addWidget(title)
         left_layout.addWidget(self.stream_status_label)
         left_layout.addWidget(self.workflow_label)
 
         settings = QGridLayout()
-        settings.addWidget(QLabel("实验"), 0, 0)
+        settings.addWidget(QLabel(tr("experiment")), 0, 0)
         settings.addWidget(self.experiment_combo, 0, 1)
-        settings.addWidget(QLabel("用户 ID"), 1, 0)
+        settings.addWidget(QLabel(tr("user_id")), 1, 0)
         settings.addWidget(self.user_id_spin, 1, 1)
-        settings.addWidget(QLabel("输出目录"), 2, 0)
+        settings.addWidget(QLabel(tr("output_dir")), 2, 0)
         settings.addWidget(self.output_dir_edit, 2, 1)
         left_layout.addLayout(settings)
 
         actions = QHBoxLayout()
-        self.rebuild_btn = QPushButton("新建 / 重建实验")
+        self.rebuild_btn = QPushButton(tr("rebuild"))
         self.rebuild_btn.setProperty("class", "btn-primary")
-        self.apply_btn = QPushButton("应用订阅")
+        self.apply_btn = QPushButton(tr("apply_subscription"))
         self.apply_btn.setProperty("class", "btn-primary")
         actions.addWidget(self.rebuild_btn)
         actions.addWidget(self.apply_btn)
         actions.addStretch()
         left_layout.addLayout(actions)
 
-        self.add_ring_selection_panel(left_layout, title_text="选择订阅戒指（不勾选表示接收全部）", max_height=150)
+        self.add_ring_selection_panel(left_layout, title_text=tr("ring_selection"), max_height=150)
         left_layout.addWidget(self.progress_label)
         left_layout.addWidget(self.surface_change_label)
         left_layout.addWidget(self.surface_label)
@@ -453,21 +614,16 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         phase_row.addWidget(self.phase_state_label, 1)
         left_layout.addLayout(phase_row)
 
-        help_label = QLabel("空格：开始 / 结束 / 下一条    退格：回退并重录上一条")
-        help_label.setProperty("class", "sub-text")
-        left_layout.addWidget(help_label)
-
         right_panel = QFrame()
         right_panel.setProperty("class", "panel")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(14, 14, 14, 14)
         right_layout.setSpacing(10)
-        result_title = QLabel("识别结果")
+        result_title = QLabel(tr("result_title"))
         result_title.setProperty("class", "title")
         right_layout.addWidget(result_title)
         right_layout.addWidget(self.result_label)
         right_layout.addWidget(self.result_meta_label)
-        right_layout.addWidget(self.log_output, 1)
 
         root.addWidget(left_panel, 3)
         root.addWidget(right_panel, 2)
@@ -482,6 +638,21 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         key = str(self.experiment_combo.currentData())
         return next(spec for spec in EXPERIMENTS if spec.key == key)
 
+    def set_connection_status(self, connected: bool) -> None:
+        if self.status_label is not None:
+            self.status_label.setText(tr("stream_connected" if connected else "stream_disconnected"))
+
+    def set_stream_error(self, message: str) -> None:
+        if self.status_label is not None:
+            self.status_label.setText(tr("stream_error", message=message))
+
+    def format_ring_text(self, ring: dict[str, Any]) -> str:
+        ring_name = str(ring.get("name", "Unknown"))
+        address = str(ring.get("address", ""))
+        connected = bool(ring.get("connected", False))
+        state = tr("ring_online" if connected else "ring_offline")
+        return f"{ring_name} | {address} | {state}"
+
     def rebuild_experiment(self) -> None:
         if self.worker is not None:
             self.worker.stop()
@@ -494,7 +665,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         self.current_samples.clear()
         self.recording_address = ""
         self.result_label.setText("--")
-        self.result_meta_label.setText("最近结果：无")
+        self.result_meta_label.setText(tr("last_result_none"))
 
         self.output_dir = Path(self.output_dir_edit.text()).expanduser()
         user_id = int(self.user_id_spin.value())
@@ -517,13 +688,13 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
             self.worker.result_ready.connect(self.on_inference_result)
             self.worker.fatal_error.connect(self.on_worker_fatal_error)
             self.worker.start()
-            self.set_runtime_status(f"状态：正在加载模型 | 数据目录：{self.data_store.experiment_dir}")
+            self.set_runtime_status(tr("loading_models"))
         else:
             self.runtime_ready = True
-            self.set_runtime_status(f"状态：采集模式 | 数据目录：{self.data_store.experiment_dir}")
+            self.set_runtime_status(tr("capture_mode"))
 
         self.refresh_prompt()
-        self.append_log(f"重建 {spec.title}，共 {len(self.trials)} 条")
+        self.append_log(tr("session_ready_log", title=experiment_title(spec), count=len(self.trials)))
         self.setFocus()
 
     def model_sources_for(self, spec: ExperimentSpec, user_id: int) -> tuple[ModelSource, ModelSource]:
@@ -548,7 +719,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
 
     def apply_subscription(self) -> None:
         self.send_subscription(["imu"])
-        self.set_runtime_status(f"状态：已订阅 IMU | {self.phase_text()}")
+        self.set_runtime_status(f"{tr('subscribed')} | {self.phase_text()}")
         self.setFocus()
 
     def handle_stream_message(self, message: dict) -> None:
@@ -592,7 +763,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
             self.current_index += 1
             self.phase = "ready"
             self.result_label.setText("--")
-            self.result_meta_label.setText("最近结果：无")
+            self.result_meta_label.setText(tr("last_result_none"))
             self.refresh_prompt()
             return
         if self.phase == "inference":
@@ -604,7 +775,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
             self.phase = "ready"
             self.current_samples.clear()
             self.recording_address = ""
-            self.set_runtime_status("状态：当前录制已取消")
+            self.set_runtime_status(tr("cancelled"))
             self.refresh_prompt()
             return
 
@@ -617,8 +788,8 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         self.current_index = new_index
         self.phase = "ready"
         self.result_label.setText("--")
-        self.result_meta_label.setText("最近结果：无")
-        self.set_runtime_status("状态：已退回，等待重新书写")
+        self.result_meta_label.setText(tr("last_result_none"))
+        self.set_runtime_status(tr("retake"))
         self.refresh_prompt()
 
     def start_capture(self) -> None:
@@ -630,9 +801,9 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         self.current_samples.clear()
         self.recording_started_at = time.time()
         self.recording_address = ""
-        self.capture_label.setText("当前录制：等待 IMU | 0 帧 | 0.00 s")
+        self.capture_label.setText(tr("capture_waiting"))
         self.update_phase_indicator()
-        self.set_runtime_status("状态：正在录制，再按空格结束")
+        self.set_runtime_status(tr("recording"))
 
     def finish_capture(self) -> None:
         trial = self.trials[self.current_index]
@@ -644,8 +815,8 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
 
         if sample_count <= 0:
             self.phase = "ready"
-            self.set_runtime_status("状态：没有采到 IMU，等待重新开始")
-            self.capture_label.setText("当前录制：无")
+            self.set_runtime_status(tr("no_imu"))
+            self.capture_label.setText(tr("capture_none"))
             self.update_phase_indicator()
             return
 
@@ -659,18 +830,20 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         if self.data_store is not None:
             self.data_store.add_record(record)
 
-        self.capture_label.setText(f"最近录制：{sample_count} 帧 | {capture_ms / 1000.0:.2f} s")
+        self.capture_label.setText(tr("last_capture", samples=sample_count, seconds=capture_ms / 1000.0))
         spec = self.current_spec()
         if not spec.needs_inference:
-            self.append_log(f"{trial.content} / {SURFACES[trial.surface_id]} -> 保存 {sample_count} 帧")
+            self.append_log(
+                tr("saved_log", content=trial.content, surface=surface_name(trial.surface_id), samples=sample_count)
+            )
             self.current_index += 1
             self.phase = "ready"
             self.refresh_prompt()
             return
 
         self.phase = "inference"
-        self.result_label.setText("推理中")
-        self.result_meta_label.setText(f"目标：{trial.content} | {sample_count} 帧")
+        self.result_label.setText(tr("inferring"))
+        self.result_meta_label.setText(tr("target_frames", target=trial.content, samples=sample_count))
         self.update_phase_indicator()
         if self.worker is None or self.runtime_failed:
             self.on_inference_result(
@@ -684,7 +857,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
                     sample_count=sample_count,
                     capture_ms=capture_ms,
                     was_resampled=False,
-                    error="模型不可用",
+                    error=tr("model_unavailable"),
                 )
             )
             return
@@ -698,17 +871,17 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
                 capture_ms=capture_ms,
             )
         )
-        self.set_runtime_status("状态：已保存原始数据，正在推理")
+        self.set_runtime_status(tr("saved_inferring"))
 
     def on_worker_ready(self) -> None:
         self.runtime_ready = True
         self.runtime_failed = False
-        self.set_runtime_status(f"状态：模型已就绪 | {self.phase_text()}")
+        self.set_runtime_status(f"{tr('model_ready')} | {self.phase_text()}")
 
     def on_worker_fatal_error(self, message: str) -> None:
         self.runtime_ready = False
         self.runtime_failed = True
-        self.set_runtime_status(f"状态：{message}")
+        self.set_runtime_status(message)
         self.append_log(message)
 
     def on_inference_result(self, result: InferenceResult) -> None:
@@ -726,7 +899,7 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
             "exact_match": bool(result.prediction == trial.content),
             "cer": float(edit_distance / max(len(trial.content), 1)),
             "surface_id": int(trial.surface_id),
-            "surface": SURFACES[trial.surface_id],
+            "surface": RECORDED_SURFACES[trial.surface_id],
             "kind": trial.kind,
             "sample_count": int(result.sample_count),
             "capture_ms": float(result.capture_ms),
@@ -739,38 +912,50 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
             self.data_store.update_result(result.trial_index, metrics)
 
         self.phase = "review"
-        display_text = result.prediction if result.prediction else "(空)"
+        display_text = result.prediction if result.prediction else tr("result_empty")
         if result.error:
-            display_text = "推理失败"
+            display_text = tr("inference_failed")
         self.result_label.setText(display_text)
+        error_text = tr("result_error", error=result.error) if result.error else ""
         self.result_meta_label.setText(
-            (
-                f"目标：{trial.content} | 编辑距离：{edit_distance} | "
-                f"置信度：{result.average_confidence:.3f} | 推理：{result.elapsed_ms:.1f} ms"
-                + (f" | 错误：{result.error}" if result.error else "")
+            tr(
+                "result_meta",
+                target=trial.content,
+                edit_distance=edit_distance,
+                confidence=result.average_confidence,
+                elapsed_ms=result.elapsed_ms,
+                error_text=error_text,
             )
         )
         self.append_log(
-            f"{trial.content} / {SURFACES[trial.surface_id]} -> {display_text} | edit={edit_distance}"
+            tr(
+                "result_log",
+                content=trial.content,
+                surface=surface_name(trial.surface_id),
+                result=display_text,
+                edit_distance=edit_distance,
+            )
         )
-        self.set_runtime_status("状态：推理完成，再按空格进入下一条")
+        self.set_runtime_status(tr("review_done"))
         self.refresh_prompt()
 
     def refresh_prompt(self) -> None:
         if self.current_index >= len(self.trials):
             self.phase = "done"
-            self.prompt_label.setText("完成")
-            self.surface_label.setText("所有内容已完成")
+            self.prompt_label.setText(tr("done"))
+            self.surface_label.setText(tr("all_done"))
             self.surface_change_label.setVisible(False)
             self.progress_label.setText(f"{len(self.trials)} / {len(self.trials)}")
-            self.capture_label.setText("当前录制：无")
+            self.capture_label.setText(tr("capture_none"))
             self.update_phase_indicator()
-            self.set_runtime_status(f"状态：实验完成 | 数据目录：{self.data_store.experiment_dir if self.data_store else ''}")
+            self.set_runtime_status(tr("experiment_done"))
             return
 
         trial = self.trials[self.current_index]
         self.prompt_label.setText(trial.content)
-        self.surface_label.setText(f"当前书写平面：{SURFACES[trial.surface_id]}（surface_id={trial.surface_id}）")
+        self.surface_label.setText(
+            tr("current_surface", surface=surface_name(trial.surface_id), surface_id=trial.surface_id)
+        )
         self.surface_change_label.setText(self.surface_instruction_text(self.current_index))
         self.surface_change_label.setVisible(self.is_surface_boundary(self.current_index))
         self.progress_label.setText(f"{self.current_index + 1} / {len(self.trials)}")
@@ -787,38 +972,40 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
         if trial_index >= len(self.trials):
             return ""
         trial = self.trials[trial_index]
-        current_surface = SURFACES[trial.surface_id]
+        current_surface = surface_name(trial.surface_id)
         if trial_index <= 0:
-            return f"开始前请确认：现在写在【{current_surface}】上"
+            return tr("start_surface", surface=current_surface)
 
-        previous_surface = SURFACES[self.trials[trial_index - 1].surface_id]
+        previous_surface = surface_name(self.trials[trial_index - 1].surface_id)
         if previous_surface == current_surface:
-            return f"继续保持在【{current_surface}】上书写"
-        return f"请先切换书写平面：从【{previous_surface}】换到【{current_surface}】"
+            return tr("same_surface", surface=current_surface)
+        return tr("switch_surface", previous=previous_surface, current=current_surface)
 
     def refresh_capture_status(self) -> None:
         if self.phase != "recording":
             return
         elapsed = max(time.time() - self.recording_started_at, 0.0)
-        ring_name = self.ring_name(self.recording_address) if self.recording_address else "等待 IMU"
-        self.capture_label.setText(f"当前录制：{ring_name} | {len(self.current_samples)} 帧 | {elapsed:.2f} s")
+        ring_name = self.ring_name(self.recording_address) if self.recording_address else tr("waiting_imu")
+        self.capture_label.setText(
+            tr("capture_live", ring_name=ring_name, samples=len(self.current_samples), elapsed=elapsed)
+        )
 
     def update_phase_indicator(self) -> None:
         if self.phase == "recording":
             color = "#1f9d55"
-            text = "正在书写 / 录制中：写完后按空格结束"
+            text = tr("phase_recording")
         elif self.phase == "inference":
             color = "#f08c00"
-            text = "已结束书写：正在识别，请等待"
+            text = tr("phase_inference")
         elif self.phase == "done":
             color = "#596579"
-            text = "实验已完成"
+            text = tr("phase_done")
         elif self.phase == "review":
             color = "#c92a2a"
-            text = "等待进入下一条：按空格继续"
+            text = tr("phase_review")
         else:
             color = "#c92a2a"
-            text = "等待开始：确认平面和内容后按空格"
+            text = tr("phase_ready")
         self.phase_dot.setStyleSheet(
             f"background-color: {color}; border-radius: 12px; border: 2px solid #ffffff;"
         )
@@ -826,11 +1013,11 @@ class HandwritingExperimentWindow(RingStreamWindowBase):
 
     def phase_text(self) -> str:
         return {
-            "ready": "等待空格开始",
-            "recording": "录制中",
-            "inference": "推理中",
-            "review": "等待空格进入下一条",
-            "done": "已完成",
+            "ready": tr("phase_ready_short"),
+            "recording": tr("phase_recording_short"),
+            "inference": tr("phase_inference_short"),
+            "review": tr("phase_review_short"),
+            "done": tr("phase_done_short"),
         }.get(self.phase, self.phase)
 
     def ring_name(self, address: str) -> str:
