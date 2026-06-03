@@ -40,10 +40,8 @@ SWIPE_CLASS_ID_SETS = {
     6: (0, 1, 2, 3, 4, 5),
 }
 
-SWIPE_ZSCORE_MEAN = np.array([-1.126, -4.515, -2.414, 0.032, -0.016, -0.010], dtype=np.float32)
-SWIPE_ZSCORE_STD = np.array([4.050, 4.676, 5.885, 1.158, 1.655, 1.128], dtype=np.float32)
-# SWIPE_ZSCORE_MEAN = np.array([-1.112, -4.195, -2.152, 0.030, -0.011, -0.010], dtype=np.float32)
-# SWIPE_ZSCORE_STD = np.array([4.122, 5.141, 6.103, 1.173, 1.619, 1.140], dtype=np.float32)
+SWIPE_ZSCORE_MEAN = np.array([-1.112, -4.195, -2.152, 0.030, -0.011, -0.010], dtype=np.float32)
+SWIPE_ZSCORE_STD = np.array([4.122, 5.141, 6.103, 1.173, 1.619, 1.140], dtype=np.float32)
 
 
 @dataclass(frozen=True)

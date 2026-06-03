@@ -11,11 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SWIPE_CLASS_IDS = (0, 1, 2, 3, 4, 5)
 SWIPE_CLASS_LABELS = {
     0: "空",
-    1: "swipe-up",
-    2: "swipe-down",
-    3: "swipe-left",
-    4: "swipe-right",
-    5: "tap",
+    1: "上",
+    2: "下",
+    3: "左",
+    4: "右",
+    5: "点击",
 }
 SWIPE_CLASS_COLORS = {
     0: QColor("#B0B8C1"),
