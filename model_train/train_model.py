@@ -79,18 +79,24 @@ def load_session(session_dir: str) -> dict | None:
     imu_time = imu[:, 6] / 1_000_000            # 第7列微秒 → 秒
 
     # ── 对齐两个时间轴 ──
-    # 取前10个 click, 每个找到最近的 IMU 帧, 反算录制起始时间 t0
-    # t0 = click_unix_time - imu_relative_time
-    t0_estimates = []
-    for c in clicks[:min(10, len(clicks))]:
-        # 粗定位: 假设第一个 click 对应的 IMU 时间约为 imu_time[0]
-        approx = c - clicks[0] + imu_time[0]
-        idx = np.argmin(np.abs(imu_time - approx))
-        # 在粗定位附近 ±5秒范围细搜索
-        lo, hi = max(0, idx - 300), min(len(imu_time), idx + 300)
-        best = lo + np.argmin(np.abs(imu_time[lo:hi] - approx))
-        t0_estimates.append(c - imu_time[best])
-    t0 = np.median(t0_estimates)  # 取中位数, 抗异常值
+    # 优先使用录制时保存的真实 t0 (精确对齐)
+    t0_files = [f for f in files if "_t0_" in f and f.endswith(".npy")]
+    if t0_files:
+        t0 = np.load(os.path.join(session_dir, t0_files[0])).item()
+    elif len(clicks) == 0:
+        # 无 click 的 session (如 shaking), t0 任意值皆可, click_rel 为空
+        t0 = imu_time[0]  # 等价于第一个 IMU 帧时间 (0)
+    else:
+        print(f"  [!] {os.path.basename(session_dir)}: 缺少 _t0_ 文件, 使用估算对齐 (旧数据, 可能偏差)")
+        # Fallback: 估算 t0 (取前10个click反算)
+        t0_estimates = []
+        for c in clicks[:min(10, len(clicks))]:
+            approx = c - clicks[0] + imu_time[0]
+            idx = np.argmin(np.abs(imu_time - approx))
+            lo, hi = max(0, idx - 300), min(len(imu_time), idx + 300)
+            best = lo + np.argmin(np.abs(imu_time[lo:hi] - approx))
+            t0_estimates.append(c - imu_time[best])
+        t0 = np.median(t0_estimates)
 
     # 将 Unix 时间戳转为相对于录制起点的秒数
     click_rel = clicks - t0
@@ -185,6 +191,7 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
     平衡策略: 仅对训练集下采样背景至击打的 2 倍。验证集保持原始分布。
     """
     train_X, train_y = [], []
+    train_names = []  # 追踪每个训练 session 的名称
     train_neg_mask = []
     val_X, val_y = [], []
     train_hit, train_bg = 0, 0
@@ -198,7 +205,7 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
         y = np.load(y_path)
         print(f"  加载预切片数据: {X.shape}, labels={np.unique(y).tolist()}")
         if val_sessions:
-            print("  ⚠ 预切片数据不支持 --val-sessions, 全部作为训练集")
+            print("  [!] 预切片数据不支持 --val-sessions, 全部作为训练集")
         return X, y
 
     # ── 格式2: 原始录制 (每个子目录是一个 session) ──
@@ -206,7 +213,7 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
         [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
     )
     if not session_dirs:
-        print("  ❌ 未找到任何 session 目录!")
+        print("  [X] 未找到任何 session 目录!")
         return np.empty((0, 6, WINDOW_FRAMES)), np.empty((0,))
 
     neg_set = set(neg_sessions) if neg_sessions else set()
@@ -242,6 +249,7 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
         else:
             train_X.append(X)
             train_y.append(y)
+            train_names.append(d)
             train_hit += nhit
             train_bg += nbg
             is_neg = neg_sessions and d in neg_set
@@ -251,37 +259,92 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
         print(f"  {tag} {d:25s}: {X.shape[0]:5d} 窗口, hit={nhit:4d}, bg={nbg:4d}")
 
     if not train_X:
-        print("  ❌ 未找到任何数据!")
+        print("  [X] 未找到任何数据!")
         return np.empty((0, 6, WINDOW_FRAMES)), np.empty((0,))
 
-    # ── 拼接训练集 ──
-    X_train = np.concatenate(train_X)
-    y_train = np.concatenate(train_y)
-    neg_mask = np.concatenate(train_neg_mask) if train_neg_mask else np.zeros(len(y_train), dtype=bool)
+    # ── 平衡训练集 (按 session 均匀抽取负例) ──
+    # 策略: 每个 session 分配均等的负例配额, 用完配额后从其他 session 补足
+    total_hit = sum(int((y == 1).sum()) for y in train_y)
+    total_bg = sum(int((y == 0).sum()) for y in train_y)
+    total_bg_keep = min(total_bg, total_hit * 2)
 
-    # ── 平衡训练集 (背景下采样, 优先保留 neg_sessions) ──
-    hit_idx = np.where(y_train == 1)[0]
-    bg_idx  = np.where(y_train == 0)[0]
-    n_keep = min(len(bg_idx), len(hit_idx) * 2)
+    n_sessions = len(train_y)
+    rng = np.random.RandomState(42)
 
-    neg_bg_idx = bg_idx[neg_mask[bg_idx]]
-    other_bg_idx = bg_idx[~neg_mask[bg_idx]]
+    # 1) 计算每个 session 的负例数量
+    session_bg_counts = np.array([int((y == 0).sum()) for y in train_y], dtype=int)
+    session_hit_counts = np.array([int((y == 1).sum()) for y in train_y], dtype=int)
 
-    print(f"\n  训练集 (平衡前): hit={train_hit}, bg={train_bg} "
-          f"(neg={len(neg_bg_idx)}, 普通={len(other_bg_idx)})")
-    if len(bg_idx) > n_keep:
-        n_neg_keep = min(len(neg_bg_idx), n_keep)
-        n_other_keep = n_keep - n_neg_keep
-        rng = np.random.RandomState(42)
-        keep_neg = rng.choice(neg_bg_idx, n_neg_keep, replace=False) if len(neg_bg_idx) > n_neg_keep else neg_bg_idx
-        keep_other = rng.choice(other_bg_idx, n_other_keep, replace=False) if len(other_bg_idx) > n_other_keep else other_bg_idx
-        keep_bg = np.concatenate([keep_neg, keep_other])
-        keep = np.concatenate([hit_idx, keep_bg])
+    # 2) 每 session 的配额: 目标 = total_bg_keep / n_sessions
+    base_quota = total_bg_keep // n_sessions
+    quota = np.full(n_sessions, base_quota, dtype=int)
+    quota[:total_bg_keep % n_sessions] += 1  # 前 remainder 个 session 各多 1
+
+    # 3) neg_sessions 获得 2x 配额 (上限为实际 bg 数量)
+    if neg_set:
+        for i, name in enumerate(train_names):
+            if name in neg_set:
+                quota[i] = min(session_bg_counts[i], quota[i] * 2)
+
+    # 4) 按配额采样, 不够的 session 全保留
+    balanced_X, balanced_y = [], []
+    kept_per_session = []
+    for i in range(n_sessions):
+        X_sess, y_sess = train_X[i], train_y[i]
+        hit_idx_local = np.where(y_sess == 1)[0]
+        bg_idx_local = np.where(y_sess == 0)[0]
+
+        n_bg_keep = min(quota[i], len(bg_idx_local))
+        if n_bg_keep > 0 and len(bg_idx_local) > n_bg_keep:
+            keep_bg = rng.choice(bg_idx_local, n_bg_keep, replace=False)
+        else:
+            keep_bg = bg_idx_local
+
+        keep = np.concatenate([hit_idx_local, keep_bg])
         keep.sort()
-        X_train = X_train[keep]
-        y_train = y_train[keep]
-        print(f"  训练集 (平衡后): hit={len(hit_idx)}, bg={n_keep} "
-              f"(neg={n_neg_keep}, 普通={n_other_keep})")
+        balanced_X.append(X_sess[keep])
+        balanced_y.append(y_sess[keep])
+        kept_per_session.append(len(keep_bg))
+
+    # 5) 如果配额没用完 (某些 session bg 太少), 从有余量的 session 补足
+    deficit = total_bg_keep - sum(kept_per_session)
+    if deficit > 0:
+        surplus_sessions = [i for i in range(n_sessions)
+                           if kept_per_session[i] < session_bg_counts[i]]
+        if surplus_sessions:
+            # 从每个有余量的 session 等比例补充
+            total_surplus = sum(session_bg_counts[i] - kept_per_session[i]
+                               for i in surplus_sessions)
+            remaining = deficit
+            for i in surplus_sessions:
+                avail = session_bg_counts[i] - kept_per_session[i]
+                n_extra = min(avail, int(deficit * avail / total_surplus) + 1)
+                n_extra = min(n_extra, remaining)
+                if n_extra > 0:
+                    X_sess = train_X[i]
+                    y_sess = train_y[i]
+                    bg_idx_local = np.where(y_sess == 0)[0]
+                    # 排除已保留的
+                    kept_set = set(kept_per_session[:i])  # 简化: 重新采样
+                    # 直接追加额外 bg (不排除已选的, 允许轻微重复)
+                    extra_bg = rng.choice(bg_idx_local, min(n_extra, len(bg_idx_local)),
+                                          replace=False)
+                    balanced_X[i] = np.concatenate([balanced_X[i],
+                        X_sess[extra_bg]])
+                    balanced_y[i] = np.concatenate([balanced_y[i],
+                        np.zeros(len(extra_bg), dtype=y_sess.dtype)])
+                    kept_per_session[i] += len(extra_bg)
+                    remaining -= len(extra_bg)
+
+    X_train = np.concatenate(balanced_X)
+    y_train = np.concatenate(balanced_y)
+
+    print(f"\n  训练集 (平衡): hit={total_hit}, bg 目标={total_bg_keep}, 实际={int((y_train==0).sum())}")
+    for i in range(n_sessions):
+        is_neg = neg_set and train_names[i] in neg_set
+        tag = " [NEG x2]" if is_neg else ""
+        print(f"    [{i}] {train_names[i]:12s} {session_bg_counts[i]:5d} bg -> 抽 {kept_per_session[i]:5d}"
+              f"  (hit={session_hit_counts[i]:4d}){tag}")
 
     print(f"  X_train: {X_train.shape}  y_train: {y_train.shape}")
 
@@ -739,7 +802,7 @@ def main():
         X_val, y_val = None, None
 
     if len(X_train) == 0:
-        print("  ❌ 无数据")
+        print("  [X] 无数据")
         return
 
     # 训练

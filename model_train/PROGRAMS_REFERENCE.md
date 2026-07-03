@@ -1,6 +1,6 @@
 # 鼓击检测项目 — 程序使用手册
 
-> 生成日期: 2026-07-03 | 共 6 个 Python 程序 + 1 个 Arduino 固件
+> 生成日期: 2026-07-03 | 共 8 个 Python 程序 + 1 个 Arduino 固件
 
 ---
 
@@ -10,10 +10,12 @@
 2. [export_training_data.py — 训练数据采集](#2-export_training_datapy--训练数据采集)
 3. [slice_dataset.py — 滑动窗口切片](#3-slice_datasetpy--滑动窗口切片)
 4. [train_model.py — 模型训练](#4-train_modelpy--模型训练)
-5. [realtime_detect.py — 实时踩踏检测](#5-realtime_detectpy--实时踩踏检测)
-6. [latency_compare.py — 延迟对比工具](#6-latency_comparepy--延迟对比工具)
-7. [visualize_session.py — 录制数据可视化](#7-visualize_sessionpy--录制数据可视化)
-8. [Arduino 固件](#8-arduino-固件)
+5. [realtime_detect.py — 实时踩踏检测 (ML 模型)](#5-realtime_detectpy--实时踩踏检测-ml-模型)
+6. [realtime_simple.py — 实时踩踏检测 (阈值)](#6-realtime_simplepy--实时踩踏检测-阈值)
+7. [latency_compare.py — 延迟对比工具](#7-latency_comparepy--延迟对比工具)
+8. [visualize_session.py — 录制数据可视化](#8-visualize_sessionpy--录制数据可视化)
+9. [fix_old_data.py — 旧数据 t0 修复](#9-fix_old_datapy--旧数据-t0-修复)
+10. [Arduino 固件](#10-arduino-固件)
 
 ---
 
@@ -22,7 +24,9 @@
 ```
 录制:  export_training_data.py  (纯录制全量数据)
           ↓
-      train_data/w_*/  (imu + click_timestamps)
+      train_data/w_*/  (imu + click_timestamps + t0)
+          ↓
+修复:  fix_old_data.py  (旧数据补写精确 t0, 新数据无需)
           ↓
 切片:  slice_dataset.py / train_model.py 内置 (滑动窗口 + 标签生成)
           ↓
@@ -34,6 +38,13 @@
           ↓
 实时:  realtime_detect.py  (纯概率双阈值滞回)
 ```
+
+### 时间对齐机制 (t0)
+
+- `export_training_data.py` 保存 `_t0_60.npy` — 第一帧 IMU 的 PC 绝对时间
+- 下游 (`train_model.py` / `slice_dataset.py` / `visualize_session.py`) 优先读取 t0 精确对齐
+- 无 t0 文件时 fallback 旧估算 (假设第一个 click 在 IMU 0s 处, **可能偏差**)
+- `fix_old_data.py` 通过搜索 IMU 峰值反推 t0, 为旧数据补写 `_t0_` 文件
 
 ---
 
@@ -58,7 +69,8 @@ pip install pyserial numpy
 | 文件 | 格式 | 说明 |
 |------|------|------|
 | `*_imu_60.npy` | `(T, 7) float64` | 列: gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z, timestamp_us |
-| `*_click_timestamps_60.npy` | `(N,) float64` | Arduino 敲击时刻 (Unix 秒) |
+| `*_click_timestamps_60.npy` | `(N,) float64` | Arduino 敲击时刻 (Unix 秒, time.time()) |
+| `*_t0_60.npy` | `(1,) float64` | 第一帧 IMU 的 PC 绝对时间, 供下游精确对齐 |
 
 ### 使用示例
 
@@ -247,7 +259,7 @@ python train_model.py --data_dir train_data --neg-sessions shaking_0,shaking_1
 
 ---
 
-## 5. realtime_detect.py — 实时踩踏检测
+## 5. realtime_detect.py — 实时踩踏检测 (ML 模型)
 
 **用途**: 接收 iPhone ZigSim OSC 流，用训练好的模型实时预测踩踏事件。
 
@@ -345,7 +357,78 @@ python realtime_detect.py --plot
 
 ---
 
-## 6. latency_compare.py — 延迟对比工具
+## 6. realtime_simple.py — 实时踩踏检测 (阈值)
+
+**用途**: 不依赖 ML 模型的纯阈值检测，基于 STA/LTA 能量比 + jerk 快速通道。零额外依赖 (只需 numpy)，启动快，延迟低。
+
+### 检测策略
+
+```
+每帧:
+  mag = sqrt(ax² + ay² + az²)
+  short = mean(mag[-3:])      # 3帧 ≈ 50ms
+  long  = mean(mag[-30:])     # 30帧 ≈ 500ms
+  ratio = short / long
+  jerk  = mag - prev_mag
+
+  主通道:   ratio > ratio_thresh  AND  mag > mag_thresh   (2~3帧确认)
+  快速通道:  jerk > jerk_thresh   AND  ratio > 1.5        (第1帧生效)
+
+  触发 = (主通道 OR 快速通道) AND 不在冷却
+```
+
+### 为什么 STA/LTA + jerk
+
+| 特性 | 实现方式 |
+|------|---------|
+| 低延迟 | 快速通道 jerk 在第 1 帧即触发 (~17ms) |
+| 抗抖腿 | STA/LTA: 抖腿 short≈long→ratio≈1, 冲击 ratio>>3 |
+| 坐姿无关 | 三轴合成 mag, ZigSim 已去重力 |
+| 方向无关 | 无需指定轴, mag 自动适应 |
+
+### 使用示例
+
+```bash
+# 基础运行
+python realtime_simple.py -v
+
+# 带实时图表
+python realtime_simple.py --plot
+
+# 调灵敏度
+python realtime_simple.py --ratio-thresh 2.0 --mag-thresh 0.5 --jerk-thresh 0.3 -v
+
+# 调试 OSC 数据
+python realtime_simple.py --debug
+```
+
+### 参数表
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--port` | int | 8888 | OSC UDP 监听端口 |
+| `--ratio-thresh` | float | 2.5 | STA/LTA 触发比值, 越低越敏感 |
+| `--mag-thresh` | float | 0.6 | mag 最低阈值 (g), 滤除微小抖动 |
+| `--jerk-thresh` | float | 0.4 | jerk 快速通道阈值 (g/帧) |
+| `--cooldown` | int | 400 | 触发后冷却时间 (ms) |
+| `--sound-wav` | str | `1.wav` | 触发时播放的 WAV 文件 |
+| `--debug` | flag | False | 每秒打印 OSC 原始数据 |
+| `--verbose`, `-v` | flag | False | 单行动态刷新 |
+| `--plot` | flag | False | 实时图表: mag + ratio + jerk 三行子图 |
+
+### 与 ML 模式 (realtime_detect.py) 对比
+
+| | realtime_simple.py | realtime_detect.py |
+|---|---|---|
+| 原理 | STA/LTA + jerk 阈值 | InceptionTime 模型推理 |
+| 延迟 | ~17ms (jerk 快速通道) | ~250ms (15帧窗口) |
+| 依赖 | numpy | numpy + torch + tsai |
+| 抗干扰 | 中 (阈值调节) | 强 (模型学习过踩踏波形) |
+| 适用场景 | 快速测试、调参、无 GPU 环境 | 正式使用、高精度需求 |
+
+---
+
+## 7. latency_compare.py — 延迟对比工具
 
 **用途**: 同时读取 Arduino 传感器和 iPhone IMU，以 PC 时钟为公共参考，在同一张图上叠加显示，分析延迟。
 
@@ -418,14 +501,30 @@ python latency_compare.py --list-ports
 
 ---
 
-## 7. visualize_session.py — 录制数据可视化
+## 8. visualize_session.py — 录制数据可视化
 
-**用途**: 读取 `train_data/` 下的单个 session，画出 6 通道 IMU 波形 + Arduino 踩踏标注。
+**用途**: 读取 `train_data/` 下的单个 session，画出 6 通道 IMU 波形 + Arduino 踩踏标注，并用颜色区分正例/负例标签区域。
+
+### 标签标注 (正例 vs 负例)
+
+- **正例 (Hit Zone)**: `[click - 10ms, click + 190ms]` = 绿色半透明区域 → 这些帧被标为击打 (label=1)
+- **负例 (Background)**: 其余所有区域 = 无标记 → 这些帧被标为背景 (label=0)
+- 绿色区域对应 `train_model.py` 中 `make_frame_labels()` 的 hit zone
+- 红色竖线 = Arduino 检测到的踩踏瞬间
+
+### --list 输出增强
+
+列出每个 session 的正/负例类型和 click 数量:
+```
+[OK] [+ POS] w_0      (200 clicks)
+[OK] [- NEG] shaking_0 (no clicks)
+Positive: 19  |  Negative: 2
+```
 
 ### 使用示例
 
 ```bash
-# 列出所有可用 session
+# 列出所有可用 session (含正/负例标记)
 python visualize_session.py --list
 
 # 画 w_0 全部数据
@@ -448,6 +547,9 @@ python visualize_session.py w_0 --title "Weak Stomp - Session 0"
 
 # 指定数据目录
 python visualize_session.py w_0 --data-dir train_data
+
+# 查看负样本 (shaking / no_move)
+python visualize_session.py shaking_0
 ```
 
 ### 参数表
@@ -461,20 +563,86 @@ python visualize_session.py w_0 --data-dir train_data
 | `--accel-only` | flag | False | 只看加速度 3 通道 |
 | `--save` | str | None | 保存图片到文件 (PNG) |
 | `--title` | str | None | 自定义标题 |
-| `--list` | flag | False | 列出所有可用 session |
+| `--list` | flag | False | 列出所有可用 session (含 +POS/-NEG 分类) |
 
 ### 图表内容
 
-- **Gyro 子图**: gyro_x/y/z 三通道波形 + 踩踏红色竖线
-- **Accel 子图**: accel_x/y/z 三通道波形 + 踩踏红色竖线
-- **Accel Mag 子图**: 合加速度幅值 `sqrt(ax²+ay²+az²)` + 踩踏编号标注 + 粉色 hit zone 半透明区域
-- 踩踏红色竖线 + 粉色阴影 = +190ms hit zone
+- **Gyro 子图**: gyro_x/y/z 三通道波形 + 绿色 hit zone + 踩踏红色竖线
+- **Accel 子图**: accel_x/y/z 三通道波形 + 绿色 hit zone + 踩踏红色竖线
+- **Accel Mag 子图**: 合加速度幅值 `sqrt(ax²+ay²+az²)` + hit zone + 踩踏编号标注
+- 绿色区域 = 正例标签 `[click-10ms, click+190ms]`，其余 = 负例背景
+- 底部图例说明: `[GREEN zone] = POSITIVE label | other = NEGATIVE (background)`
+- 标题颜色: 绿色 = 正例 session，红色 = 负例 session (无踩踏)
+- **负例 session** (shaking/no_move): 全图显示 "NO STOMP (All Background)" 水印
 - 时间轴自适应分辨率 (秒级/亚秒级刻度)
-- 踩踏编号 + 相对偏移时间标注
 
 ---
 
-## 8. Arduino 固件
+## 9. fix_old_data.py — 旧数据 t0 修复
+
+**用途**: 为录制时未保存 `_t0_` 文件的旧 session 补写精确 t0，修正时间对齐偏差。
+
+### 问题背景
+
+旧版 `export_training_data.py` 不保存 t0（第一帧 IMU 的 PC 时间）。下游对齐算法假设"第一次 click 在 IMU 0s 处"，但实际录制开始后通常有几秒空闲才第一次踩踏，导致所有 click 标注向左偏移 1~3 秒。
+
+### 修复原理 (搜索法)
+
+```
+对每个候选 offset (第一个 click 在 IMU 流中的真实秒数):
+    计算每个 click 在 IMU 上的假设位置
+    取该位置附近 accel_mag 峰值作为评分
+取评分最高的 offset → 反算 t0 = clicks[0] - offset
+```
+
+两步搜索: 粗搜 100ms 步长 + 精搜 10ms 步长，利用踩踏必然产生加速度峰值的特点自动对齐。
+
+### 使用示例
+
+```bash
+# 预览模式 (不写文件, 显示每个 session 的建议修正量)
+python fix_old_data.py --data_dir train_data
+
+# 修复模式 (写入 _t0_ 文件)
+python fix_old_data.py --data_dir train_data --fix
+
+# 修复 new_data
+python fix_old_data.py --data_dir new_data --fix
+
+# 修复单个 session
+python fix_old_data.py --data_dir train_data/w_0 --fix
+```
+
+### 参数表
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--data_dir` | str | (必填) | 数据目录 (父目录 或 单个 session) |
+| `--fix` | flag | False | 实际写入 `_t0_` 文件 (不加则仅预览修正量) |
+
+### 输出文件
+
+| 文件 | 说明 |
+|------|------|
+| `*_t0_60.npy` | `(1,) float64` — 第一帧 IMU 的 PC 绝对时间 |
+
+### 示例输出
+
+```
+[>>] w_0: 修正量=+2.1s | 第一个click从 IMU 2.1s 处开始 | (预览模式, 用 --fix 写入)
+[OK] w_0: 修正 +2.1s | t0_old=... -> t0_new=... | 已写入 whr_gesture_0_weak_0_0_t0_60.npy
+
+汇总:
+  已有 t0: 0
+  已修正: 19
+  建议修正量: +1.1s ~ +3.3s
+```
+
+> **注意**: 新录制的数据（新版 `export_training_data.py`）已自动保存 t0，无需运行此脚本。
+
+---
+
+## 10. Arduino 固件
 
 ### data_collection_leg.ino
 
@@ -512,18 +680,20 @@ Sensor 0 RISING  count=1 raw=210 delta=55 min=42
 ```bash
 # 1. 录制训练数据
 python export_training_data.py --port COM6 --wifi --strength weak --save_dir train_data/w_0
-python export_training_data.py --port COM6 --wifi --strength strong --save_dir train_data/s_0
 
-# 2. 查看录制数据
+# 2. 修复旧数据 t0 (新版录制自动保存 t0, 可跳过)
+python fix_old_data.py --data_dir train_data --fix
+
+# 3. 查看录制数据 (验证对齐)
 python visualize_session.py w_0
 
-# 3. 训练模型
+# 4. 训练模型
 python train_model.py --data_dir train_data --val-sessions w_5,f_3,strong_0 --save_dir models_margin
 
-# 4. 校准阈值
+# 5. 校准阈值
 python realtime_detect.py --model models_margin/hit_detector_inception.pth --calibrate
 
-# 5. 实时检测
+# 6. 实时检测
 python realtime_detect.py --model models_margin/hit_detector_inception.pth -v --prob-high 0.85 --prob-low 0.4
 ```
 
@@ -543,6 +713,9 @@ python train_model.py --data_dir train_data --val-sessions w_5,f_3 --neg-session
 ### 调试命令
 
 ```bash
+# 阈值模式快速测试 (无需模型)
+python realtime_simple.py -v
+
 # 调试 OSC 数据
 python realtime_detect.py --debug
 

@@ -35,24 +35,44 @@ def load_session(session_dir: str) -> dict | None:
     imu_data = imu[:, :6].astype(np.float32)
     imu_time = imu[:, 6] / 1_000_000
 
-    # 时间对齐
-    t0_estimates = []
-    for c in clicks[:min(10, len(clicks))]:
-        approx = c - clicks[0] + imu_time[0]
-        idx = np.argmin(np.abs(imu_time - approx))
-        lo, hi = max(0, idx - 300), min(len(imu_time), idx + 300)
-        best = lo + np.argmin(np.abs(imu_time[lo:hi] - approx))
-        t0_estimates.append(c - imu_time[best])
-    t0 = np.median(t0_estimates)
+    # 时间对齐: 优先使用录制时保存的真实 t0
+    t0_files = [f for f in files if "_t0_" in f and f.endswith(".npy")]
+    if t0_files:
+        t0 = np.load(os.path.join(session_dir, t0_files[0])).item()
+    else:
+        print(f"  [!] {os.path.basename(session_dir)}: 缺少 _t0_ 文件, 使用估算对齐 (旧数据, 可能偏差)")
+        t0_estimates = []
+        for c in clicks[:min(10, len(clicks))]:
+            approx = c - clicks[0] + imu_time[0]
+            idx = np.argmin(np.abs(imu_time - approx))
+            lo, hi = max(0, idx - 300), min(len(imu_time), idx + 300)
+            best = lo + np.argmin(np.abs(imu_time[lo:hi] - approx))
+            t0_estimates.append(c - imu_time[best])
+        t0 = np.median(t0_estimates)
     click_rel = clicks - t0
     valid = (click_rel >= imu_time[0]) & (click_rel <= imu_time[-1])
     click_rel = click_rel[valid]
+
+    n_total = len(clicks)
+    is_positive = n_total > 0
+
+    # 从目录名推断样本类型
+    d_lower = os.path.basename(session_dir).lower()
+    if any(k in d_lower for k in ["shaking", "no_move", "noise", "idle", "neg"]):
+        sample_type = "negative"
+    elif any(k in d_lower for k in ["weak", "strong", "w_", "s_", "f_"]):
+        sample_type = "positive"
+    else:
+        sample_type = "positive" if is_positive else "unknown"
 
     return {
         "imu": imu_data,
         "t_rel": imu_time,
         "click_rel": click_rel,
         "name": os.path.basename(session_dir),
+        "n_clicks": n_total,
+        "is_positive": is_positive,
+        "sample_type": sample_type,
     }
 
 
@@ -73,6 +93,9 @@ def plot_session(session: dict, t_range: tuple | None = None,
     t_rel = session["t_rel"]
     clicks = session["click_rel"]
     name = session["name"]
+    n_total = session["n_clicks"]
+    is_positive = session["is_positive"]
+    sample_type = session["sample_type"]
 
     # 时间范围
     if click_range is not None:
@@ -121,6 +144,9 @@ def plot_session(session: dict, t_range: tuple | None = None,
     ACCEL_COLORS = {"x": "#e67e22", "y": "#9b59b6", "z": "#1abc9c"}
 
     # ---- 绘制每排子图 ----
+    PRE_S = 0.01   # 击打前 10ms
+    POST_S = 0.19  # 击打后 190ms
+
     for row_idx, (label, chs) in enumerate(row_labels):
         ax = axes[row_idx]
         color_map = GYRO_COLORS if label == "gyro" else ACCEL_COLORS
@@ -139,10 +165,12 @@ def plot_session(session: dict, t_range: tuple | None = None,
         ax.grid(True, alpha=0.2, lw=0.5)
         ax.set_xlim(t_min, t_max)
 
-        # 踩踏竖线 + 半透明区域
+        # ---- 标注正例 (Hit Zone: [click-10ms, click+190ms]) ----
         for c in clicks_in:
+            # 击打线
             ax.axvline(x=c, color="#e74c3c", lw=1.5, alpha=0.6, ls="-", zorder=3)
-            ax.axvspan(c, c + 0.19, color="#e74c3c", alpha=0.06, zorder=0)
+            # Hit Zone 半透明绿色区域 = 正例标签
+            ax.axvspan(c - PRE_S, c + POST_S, color="#27ae60", alpha=0.10, zorder=0)
 
     # ---- 第三排: 合加速度幅值 (accel magnitude) ----
     ax = axes[-1]
@@ -154,10 +182,10 @@ def plot_session(session: dict, t_range: tuple | None = None,
     ax.grid(True, alpha=0.2, lw=0.5)
     ax.set_xlim(t_min, t_max)
 
-    # 踩踏竖线 + 编号标注
+    # Hit Zone 标注 + 编号
     for ci, c in enumerate(clicks_in):
         ax.axvline(x=c, color="#e74c3c", lw=1.5, alpha=0.6, ls="-", zorder=3)
-        ax.axvspan(c, c + 0.19, color="#e74c3c", alpha=0.06, zorder=0)
+        ax.axvspan(c - PRE_S, c + POST_S, color="#27ae60", alpha=0.10, zorder=0)
 
     # 在 magnitude 轴上标注每次踩踏的编号和时间偏移
     T0 = clicks_in[0] if len(clicks_in) > 0 else t_min
@@ -205,22 +233,44 @@ def plot_session(session: dict, t_range: tuple | None = None,
         ax.tick_params(which="major", labelsize=8, length=5)
         ax.tick_params(which="minor", length=3)
 
+    # ---- 标注正/负标签区域 ----
+    # 正例 (Hit Zone): [click-10ms, click+190ms] = 绿色区域
+    # 负例 (Background):  其余所有区域 = 无标记
+    if is_positive:
+        badge_text = f"POS={n_total} hits"
+        badge_color = "#27ae60"   # green
+    else:
+        badge_text = "NEG sample"
+        badge_color = "#e74c3c"   # red
+        for ax in axes:
+            ax.text(0.5, 0.5, "NO STOMP\n(All Background)",
+                    transform=ax.transAxes, fontsize=28, color="#e74c3c",
+                    ha="center", va="center", alpha=0.15, fontweight="bold",
+                    rotation=15)
+
     # ---- 标题 ----
-    n_total = len(clicks)
     n_shown = len(clicks_in)
-    info_parts = [f"session: {name}", f"{n_shown}/{n_total} clicks"]
+    info_parts = [f"session: {name}", f"[{badge_text}]"]
+    if is_positive:
+        info_parts.append(f"{n_shown}/{n_total} clicks shown")
     if click_range is not None:
         info_parts.append(f"click #{click_range[0]}-#{click_range[1] - 1}")
     elif t_range is not None:
         info_parts.append(f"t = [{t_min:.1f}s, {t_max:.1f}s]")
 
     suptitle = title or f"IMU Recording  —  {' | '.join(info_parts)}"
-    fig.suptitle(suptitle, fontsize=13, fontweight="bold", y=0.995)
+    fig.suptitle(suptitle, fontsize=13, fontweight="bold", y=0.995, color=badge_color)
 
     # 图例说明
-    fig.text(0.99, 0.005,
-             "red lines = Arduino click  |  pink shading = +190ms hit zone  |  "
-             "accel mag = sqrt(ax^2 + ay^2 + az^2)",
+    if is_positive:
+        footer_text = ("[GREEN zone] = POSITIVE label (hit: click-10ms ~ click+190ms)  |  "
+                       "other = NEGATIVE label (background)  |  "
+                       "red line = Arduino click  |  "
+                       "accel_mag = sqrt(ax^2+ay^2+az^2)")
+    else:
+        footer_text = ("ALL frames = NEGATIVE (background)  |  no stomp detected  |  "
+                       "accel_mag = sqrt(ax^2+ay^2+az^2)")
+    fig.text(0.99, 0.005, footer_text,
              ha="right", va="bottom", fontsize=7, color="gray",
              transform=fig.transFigure)
 
@@ -283,12 +333,29 @@ def main():
             d for d in os.listdir(data_dir)
             if os.path.isdir(os.path.join(data_dir, d))
         )
+        pos_count = 0
+        neg_count = 0
         for s in sessions:
             path = os.path.join(data_dir, s)
             imu_files = [f for f in os.listdir(path) if "_imu_" in f and f.endswith(".npy")]
             click_files = [f for f in os.listdir(path) if "click_timestamps" in f and f.endswith(".npy")]
-            has_data = "[OK]" if (imu_files and click_files) else "[NO]"
-            print(f"    [{has_data}] {s}")
+            has_data = "OK" if (imu_files and click_files) else "NO"
+            # 检查正/负例
+            n_clicks = 0
+            if imu_files and click_files:
+                clicks_arr = np.load(os.path.join(path, click_files[0]))
+                n_clicks = len(clicks_arr)
+                if n_clicks > 0:
+                    tag = "+ POS"
+                    pos_count += 1
+                else:
+                    tag = "- NEG"
+                    neg_count += 1
+            else:
+                tag = "?"
+            click_str = f"{n_clicks} clicks" if n_clicks > 0 else "no clicks"
+            print(f"    [{has_data}] [{tag}] {s:25s} ({click_str})")
+        print(f"\n  Positive: {pos_count}  |  Negative: {neg_count}")
         print()
         return
 
@@ -300,13 +367,13 @@ def main():
     # 加载
     session_path = os.path.join(data_dir, args.session)
     if not os.path.isdir(session_path):
-        print(f"❌ Session 不存在: {session_path}")
+        print(f"[X] Session 不存在: {session_path}")
         print(f"   试试 --list 查看可用 session")
         return
 
     session = load_session(session_path)
     if session is None:
-        print(f"❌ {args.session} 缺少 IMU 或 click_timestamps 文件")
+        print(f"[X] {args.session} 缺少 IMU 或 click_timestamps 文件")
         return
 
     print(f"\n  Session: {session['name']}")

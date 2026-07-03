@@ -154,6 +154,9 @@ class TrainingCollector:
 
         np.save(imu_path, imu_arr)
         np.save(click_path, click_ts)
+        # 保存 t0 (第一帧 IMU 的 PC 绝对时间), 供下游精确时间对齐
+        t0_path = os.path.join(save_dir, f"{prefix}_t0_{freq}.npy")
+        np.save(t0_path, np.array([t0]))
 
         duration_s = (imu_arr[-1, 6] - imu_arr[0, 6]) / 1_000_000
         print(f"\n{'='*60}")

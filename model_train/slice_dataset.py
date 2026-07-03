@@ -48,7 +48,7 @@ def load_session(session_dir: str, label: int) -> dict | None:
     click_file = [f for f in files if "click_timestamps" in f and f.endswith(".npy")]
 
     if not imu_file or not click_file:
-        print(f"  ⚠ {session_dir}: 缺少文件, 跳过")
+        print(f"  [!] {session_dir}: 缺少文件, 跳过")
         return None
 
     imu = np.load(os.path.join(session_dir, imu_file[0]))   # (T, 7)
@@ -60,18 +60,23 @@ def load_session(session_dir: str, label: int) -> dict | None:
 
     # 估算 t0: 取前10个 click, 找最近 IMU 帧, 算 t0 = click - imu_time_s
     imu_time_s = imu_us / 1_000_000  # 相对秒
-    t0_estimates = []
-    for c in clicks[:min(10, len(clicks))]:
-        idx = np.argmin(np.abs(imu_time_s - (c - clicks[0] + imu_time_s[0])))
-        # 搜索范围限制在前几秒内
-        search_start = max(0, idx - 300)
-        search_end = min(len(imu_time_s), idx + 300)
-        local_idx = search_start + np.argmin(
-            np.abs(imu_time_s[search_start:search_end] - (c - clicks[0] + imu_time_s[0])))
-        t0_est = c - imu_time_s[local_idx]
-        t0_estimates.append(t0_est)
 
-    t0 = np.median(t0_estimates)  # Unix 时间戳, 对应 imu[0] 的绝对时间
+    # 优先使用录制时保存的真实 t0
+    t0_files = [f for f in files if "_t0_" in f and f.endswith(".npy")]
+    if t0_files:
+        t0 = np.load(os.path.join(session_dir, t0_files[0])).item()
+    else:
+        print(f"  [!] {os.path.basename(session_dir)}: 缺少 _t0_ 文件, 使用估算对齐 (旧数据, 可能偏差)")
+        t0_estimates = []
+        for c in clicks[:min(10, len(clicks))]:
+            approx = c - clicks[0] + imu_time_s[0]
+            idx = np.argmin(np.abs(imu_time_s - approx))
+            search_start = max(0, idx - 300)
+            search_end = min(len(imu_time_s), idx + 300)
+            local_idx = search_start + np.argmin(
+                np.abs(imu_time_s[search_start:search_end] - approx))
+            t0_estimates.append(c - imu_time_s[local_idx])
+        t0 = np.median(t0_estimates)
 
     # 将 click 转为相对秒
     click_rel = clicks - t0  # (N,) 相对录制起点的秒数
@@ -211,7 +216,7 @@ def process_sessions(session_dirs: list[str], labels: list[int],
             class_counts[v] += 1
 
     if not all_X:
-        print("❌ 没有数据!")
+        print("[X] 没有数据!")
         return
 
     X_all = np.concatenate(all_X, axis=0)
@@ -294,7 +299,7 @@ def auto_find_sessions(data_dir: str) -> tuple[list[str], list[int]]:
                 label = val
                 break
         if label == 0:
-            print(f"  ⚠ {d}: 无法从目录名推断 label, 跳过 (请在目录名中包含 weak/strong)")
+            print(f"  [!] {d}: 无法从目录名推断 label, 跳过 (请在目录名中包含 weak/strong)")
             continue
 
         sessions.append(full)
@@ -361,15 +366,15 @@ def main():
         if args.labels and len(args.labels) == len(sessions):
             labels = args.labels
         else:
-            print("❌ --sessions 和 --labels 数量不匹配")
+            print("[X] --sessions 和 --labels 数量不匹配")
             return
     elif args.data_dir:
         sessions, labels = auto_find_sessions(args.data_dir)
         if not sessions:
-            print(f"❌ {args.data_dir} 下未找到有效 session")
+            print(f"[X] {args.data_dir} 下未找到有效 session")
             return
     else:
-        print("❌ 请指定 --data_dir 或 --sessions")
+        print("[X] 请指定 --data_dir 或 --sessions")
         return
 
     print(f"\n{'='*60}")
