@@ -213,3 +213,25 @@ data/
 tmp*/
 
 .DS_Store
+
+# ========================
+# 鼓击检测项目 — 忽略数据/模型
+# ========================
+
+# 训练数据 (.npy 二进制大文件)
+*.npy
+
+# 模型权重
+*.pth
+
+# MACOSX 垃圾文件
+__MACOSX/
+
+# 模型输出目录
+model_train/models/
+model_train/models_*/
+
+# 训练数据目录
+model_train/train_data/
+model_train/new_data/
+model_train/sliced_data/
