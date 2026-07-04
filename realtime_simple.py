@@ -5,8 +5,9 @@
 用 STA/LTA 能量比 + jerk 快速通道做实时踩踏检测。
 
 检测策略:
-  - 主通道: ratio > ratio_thresh AND mag > mag_thresh
+  - 主通道: ratio > ratio_thresh AND mag > mag_high
   - 快速通道: jerk > jerk_thresh AND ratio > fast_ratio
+  - 加速度双阈值滞回: mag > mag_high 触发, mag < mag_low 释放后再次触发
   - 任一满足 → 触发 WAV 音效 + 冷却
   - ratio < reset_thresh 持续 N 帧 → 滞回复位
 
@@ -16,16 +17,18 @@
   图表显示
   python realtime_simple.py --plot
   # 调参
-  python realtime_simple.py --ratio-thresh 2.0 --mag-thresh 0.5 --jerk-thresh 0.3 --fast-ratio 1.5 --plot
+  python realtime_simple.py --ratio-thresh 2.0 --mag-high 0.5 --mag-low 0.2 --jerk-thresh 0.3 --fast-ratio 1.2 --plot
   │      参数      │ 默认值 │
   ├────────────────┼────────┤
   │ --ratio-thresh │ 2.5    │
   ├────────────────┼────────┤
-  │ --mag-thresh   │ 0.6    │
+  │ --mag-high     │ 0.8    │
+├────────────────┼────────┤
+│ --mag-low      │ 0.3    │
   ├────────────────┼────────┤
-  │ --jerk-thresh  │ 0.4    │
+  │ --jerk-thresh  │ 0.35  │
   ├────────────────┼────────┤
-  │ --cooldown     │ 400    │
+  │ --cooldown     │ 150    │
   ├────────────────┼────────┤
   │ --sound-wav    │ 1.wav 
   │ --fast-ratio    │ 1.5    │
@@ -49,10 +52,11 @@ matplotlib.use('TkAgg')
 # ==================== 默认参数 ====================
 OSC_PORT = 8888
 RATIO_THRESH = 2.5
-MAG_THRESH = 0.6
-JERK_THRESH = 0.4
-COOLDOWN_MS = 400
-FAST_RATIO = 1.5
+MAG_HIGH = 0.8
+MAG_LOW = 0.3
+JERK_THRESH = 0.35
+COOLDOWN_MS = 150
+FAST_RATIO = 1.2
 SOUND_WAV = "1.wav"
 
 
@@ -126,21 +130,23 @@ class SimpleDetector:
     """
     STA/LTA 能量比 + jerk 快速通道检测, 无需模型。
 
-    主通道:   ratio > ratio_thresh AND mag > mag_thresh  (STA/LTA, 2~3帧确认)
+    主通道:   ratio > ratio_thresh AND mag > mag_high  (STA/LTA, 2~3帧确认)
     快速通道: jerk > jerk_thresh AND ratio > self.fast_ratio           (冲击第1帧生效)
     """
 
     def __init__(self,
                  ratio_thresh: float = RATIO_THRESH,
-                 mag_thresh: float = MAG_THRESH,
+                 mag_high: float = MAG_HIGH,
+                 mag_low: float = MAG_LOW,
                  jerk_thresh: float = JERK_THRESH,
                  fast_ratio: float = FAST_RATIO,
                  reset_thresh: float = 1.5,
-                 quiet_frames: int = 10,
+                 quiet_frames: int = 5,
                  cooldown_ms: int = COOLDOWN_MS,
                  sound_wav: str = SOUND_WAV):
         self.ratio_thresh = ratio_thresh
-        self.mag_thresh = mag_thresh
+        self.mag_high = mag_high
+        self.mag_low = mag_low
         self.jerk_thresh = jerk_thresh
         self.fast_ratio = fast_ratio
         self.reset_thresh = reset_thresh
@@ -156,6 +162,7 @@ class SimpleDetector:
         self.mag_history: deque = deque(maxlen=30)
         self.armed = False
         self.quiet_count = 0
+        self.mag_ready = True  # 加速度双阈值: mag < mag_low 后重新就绪
         self.last_trigger_time = 0.0
 
         self.total_frames = 0
@@ -173,8 +180,9 @@ class SimpleDetector:
 
     def run(self, verbose: bool = False):
         print(f"\n  实时踩踏检测 (STA/LTA + jerk, 无需模型)")
-        print(f"  主通道: ratio > {self.ratio_thresh:.1f} AND mag > {self.mag_thresh:.2f}g")
+        print(f"  主通道: ratio > {self.ratio_thresh:.1f} AND mag > {self.mag_high:.2f}g")
         print(f"  快速通道: jerk > {self.jerk_thresh:.2f}g/帧 AND ratio > {self.fast_ratio}")
+        print(f"  加速度滞回: mag < {self.mag_low:.2f}g 释放后重新就绪")
         print(f"  释放: ratio < {self.reset_thresh:.1f} 持续 {self.quiet_frames} 帧")
         print(f"  冷却: {self.cooldown_s * 1000:.0f}ms | 音效: {self.sound_wav}")
         print(f"  等待 IMU 数据...\n")
@@ -211,11 +219,11 @@ class SimpleDetector:
             if mag > self.max_mag:
                 self.max_mag = mag
 
-            if len(self.mag_history) < 3:
+            if len(self.mag_history) < 2:
                 continue
 
             # STA/LTA
-            short = np.mean(list(self.mag_history)[-3:])
+            short = np.mean(list(self.mag_history)[-2:])
             long  = np.mean(self.mag_history)
             ratio = short / (long + 1e-8)
 
@@ -228,12 +236,17 @@ class SimpleDetector:
             now = time.time()
             in_cooldown = (now - self.last_trigger_time) < self.cooldown_s
 
-            trig_main = ratio > self.ratio_thresh and mag > self.mag_thresh
+            trig_main = ratio > self.ratio_thresh and mag > self.mag_high
             trig_fast = jerk > self.jerk_thresh and ratio > self.fast_ratio
 
+            # 加速度双阈值: mag < mag_low 时重新就绪
+            if not self.mag_ready and mag < self.mag_low:
+                self.mag_ready = True
+
             if not self.armed:
-                if (trig_main or trig_fast) and not in_cooldown:
+                if (trig_main or trig_fast) and not in_cooldown and self.mag_ready:
                     self.armed = True
+                    self.mag_ready = False
                     self.quiet_count = 0
                     self.total_triggers += 1
                     channel = "FAST" if (trig_fast and not trig_main) else "STA/LTA"
@@ -269,7 +282,7 @@ class SimpleDetector:
         bar = ("=" * max(0, bar_len - 1) + ">") if bar_len > 0 else "|"
         bar = bar.ljust(30)
 
-        trig_main = ratio > self.ratio_thresh and mag > self.mag_thresh
+        trig_main = ratio > self.ratio_thresh and mag > self.mag_high
         trig_fast = jerk > self.jerk_thresh and ratio > self.fast_ratio
 
         if self.armed:
@@ -281,7 +294,7 @@ class SimpleDetector:
 
         cdl = max(0.0, self.cooldown_s - (time.time() - self.last_trigger_time))
         cd = f"CD{cdl:.1f}" if cdl > 0.01 else "   "
-        state = "A" if self.armed else "."
+        state = "A" if self.armed else ("." if self.mag_ready else "m")
 
         print(f"\r  [{bar}] r={ratio:3.1f} mag={mag:.2f} j={jerk:+.2f} | "
               f"{state} {cd} | trig={self.total_triggers} | {marker}",
@@ -341,7 +354,7 @@ def osc_listener(detector: SimpleDetector, port: int, debug: bool = False):
 # ==================== 实时绘图 ====================
 
 def run_plot(detector: SimpleDetector, ratio_thresh: float,
-             mag_thresh: float, jerk_thresh: float):
+             mag_high: float, mag_low: float, jerk_thresh: float):
     """后台线程: 实时显示 accel_mag + ratio + jerk."""
     import matplotlib.pyplot as plt
 
@@ -351,10 +364,12 @@ def run_plot(detector: SimpleDetector, ratio_thresh: float,
 
     # accel_mag
     line_mag, = ax_mag.plot([], [], "k-", lw=1.2, label="mag")
-    ax_mag.axhline(y=mag_thresh, color="green", ls="--", lw=1, alpha=0.7,
-                   label=f"mag={mag_thresh}")
+    ax_mag.axhline(y=mag_high, color="green", ls="--", lw=1, alpha=0.7,
+                   label=f"mag_high={mag_high}")
     ax_mag.set_ylabel("mag (g)")
     ax_mag.set_ylim(-0.2, 5)
+    ax_mag.axhline(y=mag_low, color="orange", ls="--", lw=1, alpha=0.7,
+                   label=f"mag_low={mag_low}")
     ax_mag.legend(loc="upper right", fontsize=7)
     ax_mag.grid(True, alpha=0.2)
 
@@ -437,7 +452,7 @@ def main():
         epilog="""
 示例:
   python realtime_simple.py -v
-  python realtime_simple.py --ratio-thresh 2.0 --mag-thresh 0.5 -v
+  python realtime_simple.py --ratio-thresh 2.0 --mag-high 0.5 --mag-low 0.2 -v
   python realtime_simple.py --plot
         """,
     )
@@ -445,14 +460,18 @@ def main():
                         help=f"OSC UDP 端口 (默认: {OSC_PORT})")
     parser.add_argument("--ratio-thresh", type=float, default=RATIO_THRESH,
                         help=f"STA/LTA 触发比值 (默认: {RATIO_THRESH})")
-    parser.add_argument("--mag-thresh", type=float, default=MAG_THRESH,
-                        help=f"mag 最低阈值 g (默认: {MAG_THRESH})")
+    parser.add_argument("--mag-high", type=float, default=MAG_HIGH,
+                        help=f"mag 触发高阈值 g (默认: {MAG_HIGH})")
+    parser.add_argument("--mag-low", type=float, default=MAG_LOW,
+                        help=f"mag 释放低阈值 g, 低于此值后重新就绪 (默认: {MAG_LOW})")
     parser.add_argument("--jerk-thresh", type=float, default=JERK_THRESH,
                         help=f"jerk 快速通道阈值 g/帧 (默认: {JERK_THRESH})")
     parser.add_argument("--fast-ratio", type=float, default=FAST_RATIO,
                         help=f"快速通道最低 ratio (默认: {FAST_RATIO})")
     parser.add_argument("--cooldown", type=int, default=COOLDOWN_MS,
                         help=f"触发后冷却 ms (默认: {COOLDOWN_MS})")
+    parser.add_argument("--quiet-frames", type=int, default=5,
+                        help=f"ratio<reset_thresh 持续帧数才释放滞回 (默认: 5)")
     parser.add_argument("--sound-wav", type=str, default=SOUND_WAV,
                         help=f"触发音效 WAV 文件 (默认: {SOUND_WAV})")
     parser.add_argument("--debug", action="store_true",
@@ -470,9 +489,11 @@ def main():
 
     detector = SimpleDetector(
         ratio_thresh=args.ratio_thresh,
-        mag_thresh=args.mag_thresh,
+        mag_high=args.mag_high,
+        mag_low=args.mag_low,
         jerk_thresh=args.jerk_thresh,
         fast_ratio=args.fast_ratio,
+        quiet_frames=args.quiet_frames,
         cooldown_ms=args.cooldown,
         sound_wav=args.sound_wav,
     )
@@ -489,7 +510,7 @@ def main():
     if args.plot:
         plot_thread = threading.Thread(
             target=run_plot,
-            args=(detector, args.ratio_thresh, args.mag_thresh, args.jerk_thresh),
+            args=(detector, args.ratio_thresh, args.mag_high, args.mag_low, args.jerk_thresh),
             daemon=True)
         plot_thread.start()
 
@@ -503,7 +524,5 @@ def main():
         print(f"  Frames: {detector.total_frames}")
         print(f"  Triggers: {detector.total_triggers}")
         print(f"  Max mag: {detector.max_mag:.2f}g")
-
-
 if __name__ == "__main__":
     main()
