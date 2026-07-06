@@ -86,8 +86,10 @@ CHANNEL_UNITS = ["rad/s", "rad/s", "rad/s", "g", "g", "g"]
 def plot_session(session: dict, t_range: tuple | None = None,
                  click_range: tuple | None = None,
                  accel_only: bool = False, title: str | None = None,
-                 save_path: str | None = None):
-    """核心绘图函数"""
+                 save_path: str | None = None,
+                 pre_ms: int = 70, post_ms: int = 150):
+    """核心绘图函数.
+       pre_ms/post_ms: 击打区扩展 ms, 控制绿色 hit zone 显示范围 (默认 70/150)."""
 
     imu = session["imu"]
     t_rel = session["t_rel"]
@@ -144,8 +146,8 @@ def plot_session(session: dict, t_range: tuple | None = None,
     ACCEL_COLORS = {"x": "#e67e22", "y": "#9b59b6", "z": "#1abc9c"}
 
     # ---- 绘制每排子图 ----
-    PRE_S = 0.01   # 击打前 10ms
-    POST_S = 0.19  # 击打后 190ms
+    PRE_S = pre_ms / 1000   # 击打前 s
+    POST_S = post_ms / 1000  # 击打后 s
 
     for row_idx, (label, chs) in enumerate(row_labels):
         ax = axes[row_idx]
@@ -263,7 +265,7 @@ def plot_session(session: dict, t_range: tuple | None = None,
 
     # 图例说明
     if is_positive:
-        footer_text = ("[GREEN zone] = POSITIVE label (hit: click-10ms ~ click+190ms)  |  "
+        footer_text = (f"[GREEN zone] = POSITIVE label (hit: click-{pre_ms}ms ~ click+{post_ms}ms)  |  "
                        "other = NEGATIVE label (background)  |  "
                        "red line = Arduino click  |  "
                        "accel_mag = sqrt(ax^2+ay^2+az^2)")
@@ -291,18 +293,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python visualize_session.py w_0                    # 画全部
+  python visualize_session.py w_0                    # 画全部 (默认 hit-zone: -70/+150ms)
   python visualize_session.py w_0 --range 5 20       # 5-20秒
   python visualize_session.py w_0 --clicks 10 25     # 第10-25次踩踏
   python visualize_session.py w_0 --accel-only       # 只看加速度
+  python visualize_session.py w_0 --pre 50 --post 200  # 自定义 hit-zone 范围
   python visualize_session.py w_0 --save plot.png    # 保存到文件
-  python visualize_session.py --list                 # 列出可用session
+  python visualize_session.py --list                 # 列出 train_data/ 下可用session
+  python visualize_session.py --list --data-dir ../other_data  # 列出其他目录
         """,
     )
     parser.add_argument("session", nargs="?", default=None,
-                        help="Session 名称 (例如 w_0, f_2, shaking_0)")
+                        help="Session 名称或路径. "
+                             "可以是名字 (如 w_0, 自动在 --data-dir 下查找), "
+                             "也可以是相对/绝对路径 (如 ../other_data/w_0)")
     parser.add_argument("--data-dir", default="train_data",
-                        help="数据目录 (默认: train_data)")
+                        help="数据目录, session 为名字时在此目录下查找 (默认: train_data)")
     parser.add_argument("--range", nargs=2, type=float, default=None,
                         metavar=("T_MIN", "T_MAX"),
                         help="显示的时间范围 (秒)")
@@ -318,29 +324,40 @@ def main():
                         help="自定义标题")
     parser.add_argument("--list", action="store_true",
                         help="列出所有可用 session 并退出")
+    parser.add_argument("--pre", type=int, default=70,
+                        help="击打前扩展 ms, 控制绿色 hit-zone 起点 (默认: 70)")
+    parser.add_argument("--post", type=int, default=150,
+                        help="击打后扩展 ms, 控制绿色 hit-zone 终点 (默认: 150)")
 
     args = parser.parse_args()
 
     data_dir = args.data_dir
 
-    # --list 模式
+    # --list 模式: 列出可用 session
     if args.list:
-        print(f"\n  {data_dir}/ 下的可用 session:\n")
-        if not os.path.isdir(data_dir):
-            print("  目录不存在!")
+        # 支持列出任意目录 (包括 --data-dir 和直接路径)
+        list_dir = args.data_dir
+        if args.session and (os.sep in args.session or "/" in args.session):
+            list_dir = args.session  # 直接把 session 当路径用
+
+        print(f"\n  {list_dir}/ 下的可用 session:\n")
+        if not os.path.isdir(list_dir):
+            print(f"  目录不存在: {list_dir}")
             return
         sessions = sorted(
-            d for d in os.listdir(data_dir)
-            if os.path.isdir(os.path.join(data_dir, d))
+            d for d in os.listdir(list_dir)
+            if os.path.isdir(os.path.join(list_dir, d))
         )
+        if not sessions:
+            print("  (无子目录)")
+            return
         pos_count = 0
         neg_count = 0
         for s in sessions:
-            path = os.path.join(data_dir, s)
+            path = os.path.join(list_dir, s)
             imu_files = [f for f in os.listdir(path) if "_imu_" in f and f.endswith(".npy")]
             click_files = [f for f in os.listdir(path) if "click_timestamps" in f and f.endswith(".npy")]
             has_data = "OK" if (imu_files and click_files) else "NO"
-            # 检查正/负例
             n_clicks = 0
             if imu_files and click_files:
                 clicks_arr = np.load(os.path.join(path, click_files[0]))
@@ -364,11 +381,18 @@ def main():
         print("\n  请指定 session 名称, 或 --list 查看可用列表")
         return
 
-    # 加载
-    session_path = os.path.join(data_dir, args.session)
+    # ── 解析 session 路径: 支持名字 (在 --data-dir 下查找) 和直接路径 ──
+    if os.sep in args.session or "/" in args.session or os.path.isabs(args.session):
+        # 直接路径 (含目录分隔符 or 绝对路径)
+        session_path = args.session
+    else:
+        # 名字: 拼接 --data-dir
+        session_path = os.path.join(data_dir, args.session)
+
     if not os.path.isdir(session_path):
         print(f"[X] Session 不存在: {session_path}")
-        print(f"   试试 --list 查看可用 session")
+        print(f"   试试 --list 查看 {data_dir}/ 下可用 session")
+        print(f"   或直接传路径: python visualize_session.py ../other_data/w_0")
         return
 
     session = load_session(session_path)
@@ -389,6 +413,8 @@ def main():
         accel_only=args.accel_only,
         title=args.title,
         save_path=args.save,
+        pre_ms=args.pre,
+        post_ms=args.post,
     )
 
 

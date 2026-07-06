@@ -22,248 +22,182 @@
  参考:
    InceptionTime: Fawaz et al. (2020) https://arxiv.org/abs/1909.04939
    FCN: Wang et al. (2017) "Time Series Classification from Scratch"
+   python train_model.py --data_dir sliced_data  --neg-sessions shaking_0,shaking_1,with_hand,with_hand_1,with_hand_2
 """
 
 import os
 import argparse
 import numpy as np
-from collections import defaultdict
 
 # ============================================================================
-# 一、切片参数 (所有值均可通过命令行覆盖)
+# 一、数据加载: 从预处理目录加载独立 session 切片 + 汇总
 # ============================================================================
 
-WINDOW_SEC = 0.25           # 窗口长度: 250ms (15帧, 足够看到完整波动)
-STRIDE_SEC = 0.033          # 滑动步长: 2帧 ≈ 33ms (训练用, 降低样本冗余)
-TARGET_FS = 60              # 手机 IMU 采样率 (ZigSim 60Hz)
-PRE_MS = 10                 # 击打前扩展: 10ms (允许微弱预判)
-POST_MS = 190               # 击打后扩展: 190ms (覆盖P90, 标注绝大部分可见波动)
-WINDOW_FRAMES = int(WINDOW_SEC * TARGET_FS)    # 15帧
-STRIDE_FRAMES = int(STRIDE_SEC * TARGET_FS)    # 2帧
-
-
-# ============================================================================
-# 二、数据加载: 从 session 目录读取连续 IMU + 敲击时间戳
-# ============================================================================
-
-def load_session(session_dir: str) -> dict | None:
+def load_session_slices(data_dir: str,
+                        val_sessions: list[str] | None = None,
+                        neg_sessions: list[str] | None = None) -> dict:
     """
-    加载一个采集 session。
+    加载 slice_dataset.py 按 session 独立切片的数据, 按需汇总 train/val。
 
-    输入: train_data/w_0/ 目录, 包含:
-      whr_gesture_0_weak_0_0_imu_60.npy           → (T, 7) float64
-        列: [gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z, timestamp_us]
-        其中 timestamp_us 是相对于录制起点的微秒数
-      whr_gesture_0_weak_0_0_click_timestamps_60.npy → (N,) float64
-        Unix 秒级时间戳, 每次 Arduino 检测到敲击的时刻
+    格式检测顺序:
+      1. sessions.txt — 新格式: 每个 session 独立文件 ({name}_X.npy + {name}_y.npy)
+      2. X_train.npy + y_train.npy — 旧新格式 (合并好的训练集)
+      3. X.npy + y.npy — 旧旧格式 (无验证分割)
+      4. 子目录含 _imu_ 文件 — 原始 session, 打印错误引导
 
-    关键: IMU 的时间轴是相对微秒, click 是 Unix 绝对秒, 需要对齐。
-          IMU[:,6] = (pc_time - t0) * 1e6
-          click   = pc_time
-          → t0 = click - imu_time_s
-          → click_rel = click - t0  (转为相对秒, 与 IMU 时间轴对齐)
+    val_sessions: 指定哪些 session 划入验证集 (不参与训练, 不做平衡)
+    neg_sessions: 纯背景 session, 平衡采样时给 2x 配额
 
-    返回: {"imu": (T,6), "t_rel": (T,), "click_rel": (N,)}
+    返回 dict: {X_train, y_train, X_val, y_val, mean, std, preproc, format}
     """
-    files = os.listdir(session_dir)
-    imu_files = [f for f in files if "_imu_" in f and f.endswith(".npy")]
-    click_files = [f for f in files if "click_timestamps" in f and f.endswith(".npy")]
-    if not imu_files or not click_files:
-        return None
+    sessions_path = os.path.join(data_dir, "sessions.txt")
 
-    # 加载原始数据
-    imu = np.load(os.path.join(session_dir, imu_files[0]))        # (T, 7)
-    clicks = np.load(os.path.join(session_dir, click_files[0]))   # (N,) Unix秒
+    # ── 格式1: 按 session 独立切片 (sessions.txt + {name}_X.npy) ──
+    if os.path.exists(sessions_path):
+        with open(sessions_path, "r", encoding="utf-8") as f:
+            all_sessions = [line.strip() for line in f if line.strip()]
 
-    imu_data = imu[:, :6].astype(np.float32)   # 前6列为 IMU 信号
-    imu_time = imu[:, 6] / 1_000_000            # 第7列微秒 → 秒
+        val_set = set(val_sessions) if val_sessions else set()
+        neg_set = set(neg_sessions) if neg_sessions else set()
+        all_set = set(all_sessions)
 
-    # ── 对齐两个时间轴 ──
-    # 优先使用录制时保存的真实 t0 (精确对齐)
-    t0_files = [f for f in files if "_t0_" in f and f.endswith(".npy")]
-    if t0_files:
-        t0 = np.load(os.path.join(session_dir, t0_files[0])).item()
-    elif len(clicks) == 0:
-        # 无 click 的 session (如 shaking), t0 任意值皆可, click_rel 为空
-        t0 = imu_time[0]  # 等价于第一个 IMU 帧时间 (0)
-    else:
-        print(f"  [!] {os.path.basename(session_dir)}: 缺少 _t0_ 文件, 使用估算对齐 (旧数据, 可能偏差)")
-        # Fallback: 估算 t0 (取前10个click反算)
-        t0_estimates = []
-        for c in clicks[:min(10, len(clicks))]:
-            approx = c - clicks[0] + imu_time[0]
-            idx = np.argmin(np.abs(imu_time - approx))
-            lo, hi = max(0, idx - 300), min(len(imu_time), idx + 300)
-            best = lo + np.argmin(np.abs(imu_time[lo:hi] - approx))
-            t0_estimates.append(c - imu_time[best])
-        t0 = np.median(t0_estimates)
+        # 校验: val/neg 中未出现在 sessions.txt 中的名字 → 报警
+        unknown_val = val_set - all_set
+        unknown_neg = neg_set - all_set
+        if unknown_val:
+            print(f"  [WARN] --val-sessions 中这些 session 不在 {data_dir}/ 中: {sorted(unknown_val)}")
+        if unknown_neg:
+            print(f"  [WARN] --neg-sessions 中这些 session 不在 {data_dir}/ 中: {sorted(unknown_neg)}")
 
-    # 将 Unix 时间戳转为相对于录制起点的秒数
-    click_rel = clicks - t0
-    # 过滤超出 IMU 录制范围的 click
-    valid = (click_rel >= imu_time[0]) & (click_rel <= imu_time[-1])
+        train_X, train_y = [], []
+        train_names = []
+        val_X, val_y = [], []
+        train_hit, train_bg = 0, 0
+        val_hit, val_bg = 0, 0
 
-    return {
-        "imu": imu_data,
-        "t_rel": imu_time,
-        "click_rel": click_rel[valid],
-    }
+        print(f"\n  Session 分割:")
+        if val_sessions:
+            print(f"  验证集: {val_sessions}")
+            print(f"  训练集: 其余 {len(all_sessions) - len(val_set)} 个 session")
+        if neg_sessions:
+            print(f"  负样本优先保留: {neg_sessions}")
+        print(f"  {'─' * 60}")
 
+        for name in all_sessions:
+            x_path = os.path.join(data_dir, f"{name}_X.npy")
+            y_path = os.path.join(data_dir, f"{name}_y.npy")
+            if not os.path.exists(x_path) or not os.path.exists(y_path):
+                print(f"  [!] {name}: 缺少切片文件, 跳过")
+                continue
 
-# ============================================================================
-# 三、标签生成: 从敲击时刻生成逐帧二值标签
-# ============================================================================
+            X = np.load(x_path)
+            y = np.load(y_path).astype(np.int64)
+            nhit = int(y.sum())
+            nbg = X.shape[0] - nhit
 
-def make_frame_labels(t_rel: np.ndarray, click_rel: np.ndarray) -> np.ndarray:
-    """
-    生成逐帧二值标签。
+            if val_sessions and name in val_set:
+                val_X.append(X); val_y.append(y)
+                val_hit += nhit; val_bg += nbg
+                tag = "[VAL]"
+            else:
+                train_X.append(X); train_y.append(y)
+                train_names.append(name)
+                train_hit += nhit; train_bg += nbg
+                is_neg = neg_sessions and name in neg_set
+                tag = "[TRAIN-NEG]" if is_neg else "[TRAIN]"
 
-    hit_zone = [click - PRE_MS, click + POST_MS]
-    时间轴示意 (每格 ≈ 16.7ms @ 60Hz):
-      帧:  0   1   2   3   4   5   6   7   8
-                    ↑ click (Arduino 检测到敲击)
-               [========== hit_zone =========]
-           0   0   1   1   1   1   1   0   0  ← 逐帧标签
+            print(f"  {tag} {name:25s}: {X.shape[0]:5d} 窗口, hit={nhit:4d}, bg={nbg:4d}")
 
-    多个 click 的 hit_zone 可能重叠, 保持 1。
-    """
-    y = np.zeros(len(t_rel), dtype=np.float32)
-    pre_s = PRE_MS / 1000   # 15ms → 0.015s
-    post_s = POST_MS / 1000  # 65ms → 0.065s
+        if not train_X:
+            print("  [X] 未找到任何训练数据!")
+            return {"X_train": np.empty((0, 6, 15)), "y_train": np.empty((0,)),
+                    "X_val": None, "y_val": None,
+                    "mean": None, "std": None, "preproc": None, "format": "sessions"}
 
-    for c in click_rel:
-        lo = np.searchsorted(t_rel, c - pre_s)  # hit_zone 起始帧
-        hi = np.searchsorted(t_rel, c + post_s)  # hit_zone 结束帧
-        if lo < hi:
-            y[lo:hi] = 1.0
-    return y
+        # ── 平衡训练集 ──
+        X_train, y_train = _balance_dataset(train_X, train_y, train_names, neg_set)
 
+        # ── 汇总验证集 ──
+        X_val_out, y_val_out = None, None
+        if val_X:
+            X_val_out = np.concatenate(val_X)
+            y_val_out = np.concatenate(val_y)
+            print(f"  X_val:   {X_val_out.shape}  y_val:   {y_val_out.shape}  "
+                  f"(hit={val_hit}, bg={val_bg})")
+        else:
+            print(f"  (无独立验证集, 将随机分割)")
 
-# ============================================================================
-# 四、滑动窗口切片: 连续 IMU → (N, C, T) 训练样本
-# ============================================================================
+        # ── 加载 preproc ──
+        pp_path = os.path.join(data_dir, "preproc.npz")
+        mean, std, preproc = None, None, None
+        if os.path.exists(pp_path):
+            pp = np.load(pp_path)
+            mean = pp["mean"]; std = pp["std"]
+            preproc = {k: pp[k].item() if pp[k].ndim == 0 else pp[k]
+                       for k in pp.files if k not in ("mean", "std")}
 
-def slice_windows(imu: np.ndarray, y_frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    滑动窗口切片。
+        return {"X_train": X_train, "y_train": y_train,
+                "X_val": X_val_out, "y_val": y_val_out,
+                "mean": mean, "std": std, "preproc": preproc, "format": "sessions"}
 
-    关键设计: 标签取窗口末尾帧, 而非中心帧。
-    原因: 推理时模型只见过往数据 (窗口 [t-150ms, t]), 需要预测 t 时刻的状态。
-          如果训练时用窗口中心帧做标签, 模型会依赖 "未来" 数据, 与推理不一致。
+    # ── 格式2: 旧新格式 (X_train.npy + y_train.npy) ──
+    xt_path = os.path.join(data_dir, "X_train.npy")
+    yt_path = os.path.join(data_dir, "y_train.npy")
+    if os.path.exists(xt_path) and os.path.exists(yt_path):
+        print("  [兼容] 加载旧格式 X_train.npy + y_train.npy")
+        result = {"format": "merged", "X_train": np.load(xt_path),
+                  "y_train": np.load(yt_path).astype(np.int64),
+                  "X_val": None, "y_val": None,
+                  "mean": None, "std": None, "preproc": None}
+        xv_path = os.path.join(data_dir, "X_val.npy")
+        yv_path = os.path.join(data_dir, "y_val.npy")
+        if os.path.exists(xv_path) and os.path.exists(yv_path):
+            result["X_val"] = np.load(xv_path)
+            result["y_val"] = np.load(yv_path).astype(np.int64)
+        pp_path = os.path.join(data_dir, "preproc.npz")
+        if os.path.exists(pp_path):
+            pp = np.load(pp_path)
+            result["mean"] = pp["mean"]; result["std"] = pp["std"]
+            result["preproc"] = {k: pp[k].item() if pp[k].ndim == 0 else pp[k]
+                                for k in pp.files if k not in ("mean", "std")}
+        if val_sessions:
+            print("  [!] --val-sessions 对合并格式无效, 请用 sessions.txt 格式")
+        return result
 
-    训练窗口: [t-150ms, t]  → 标签 = t 时刻的帧标签
-    推理窗口: [now-150ms, now] → 预测 now 时刻是否击打
-    """
-    T, W, S = len(imu), WINDOW_FRAMES, STRIDE_FRAMES
-    n = max(0, (T - W) // S + 1)  # 窗口总数
-
-    X_list, y_list = [], []
-    for i in range(n):
-        start = i * S
-        end = start + W
-        # tsai 格式: (通道, 时间) = (C, T)
-        X_list.append(imu[start:end].T)
-        # 标签 = 窗口末尾帧 (即 "此刻")
-        y_list.append(y_frame[end - 1])
-
-    if not X_list:
-        return np.empty((0, 6, W)), np.empty((0,))
-    return np.stack(X_list), np.array(y_list)
-
-
-# ============================================================================
-# 五、构建数据集: 合并所有 session, 平衡正负样本
-# ============================================================================
-
-def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
-                  neg_sessions: list[str] | None = None):
-    """
-    加载训练数据，支持两种格式:
-
-      1. 预切片格式: data_dir/ 下有 X.npy + y.npy (slice_dataset.py 的输出)
-      2. 原始录制格式: data_dir/ 下有子目录, 每个含 _imu_ 文件
-
-    当 val_sessions 提供时，按 session 级别分割训练/验证集（无窗口泄露）。
-    否则返回全部数据，由调用方随机分割。
-
-    当 neg_sessions 提供时，这些 session 的背景样本在平衡下采样时优先保留。
-
-    平衡策略: 仅对训练集下采样背景至击打的 2 倍。验证集保持原始分布。
-    """
-    train_X, train_y = [], []
-    train_names = []  # 追踪每个训练 session 的名称
-    train_neg_mask = []
-    val_X, val_y = [], []
-    train_hit, train_bg = 0, 0
-    val_hit, val_bg = 0, 0
-
-    # ── 格式1: 预切片数据 (X.npy + y.npy) ──
+    # ── 格式3: 旧旧格式 (X.npy + y.npy) ──
     x_path = os.path.join(data_dir, "X.npy")
     y_path = os.path.join(data_dir, "y.npy")
     if os.path.exists(x_path) and os.path.exists(y_path):
-        X = np.load(x_path)
-        y = np.load(y_path)
-        print(f"  加载预切片数据: {X.shape}, labels={np.unique(y).tolist()}")
-        if val_sessions:
-            print("  [!] 预切片数据不支持 --val-sessions, 全部作为训练集")
-        return X, y
+        print("  [兼容] 加载旧格式 X.npy + y.npy (无 preproc)")
+        return {"format": "legacy", "X_train": np.load(x_path),
+                "y_train": np.load(y_path).astype(np.int64),
+                "X_val": None, "y_val": None,
+                "mean": None, "std": None, "preproc": None}
 
-    # ── 格式2: 原始录制 (每个子目录是一个 session) ──
-    session_dirs = sorted(
-        [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
-    )
-    if not session_dirs:
-        print("  [X] 未找到任何 session 目录!")
-        return np.empty((0, 6, WINDOW_FRAMES)), np.empty((0,))
+    # ── 格式4: 原始 session 目录 → 报错引导 ──
+    try:
+        raw = [d for d in os.listdir(data_dir)
+               if os.path.isdir(os.path.join(data_dir, d))
+               and any("_imu_" in f for f in os.listdir(os.path.join(data_dir, d)))]
+    except Exception:
+        raw = []
+    if raw:
+        print(f"\n  [X] 检测到 {len(raw)} 个原始 session 目录, 不能直接训练!")
+        print(f"      请先运行 slice_dataset.py 进行预处理:")
+        print(f"      $ python slice_dataset.py --data_dir {data_dir} --save sliced_data")
+        print(f"      然后训练: python train_model.py --data_dir sliced_data")
+        raise SystemExit(1)
 
-    neg_set = set(neg_sessions) if neg_sessions else set()
-    print(f"\n  Session 分割:")
-    if val_sessions:
-        val_set = set(val_sessions)
-        print(f"  验证集: {val_sessions}")
-        print(f"  训练集: 其余 {len(session_dirs) - len(val_set)} 个 session")
-    if neg_sessions:
-        print(f"  负样本优先保留: {neg_sessions}")
-    print(f"  {'─' * 60}")
+    print(f"\n  [X] {data_dir} 下未找到预处理数据")
+    raise SystemExit(1)
 
-    for d in session_dirs:
-        path = os.path.join(data_dir, d)
-        s = load_session(path)
-        if s is None:
-            continue
 
-        # 生成逐帧标签 + 滑动窗口切片
-        y_frame = make_frame_labels(s["t_rel"], s["click_rel"])
-        X, y = slice_windows(s["imu"], y_frame)
-
-        nhit = int(y.sum())
-        nbg = X.shape[0] - nhit
-
-        # 按 session 分配到训练集或验证集
-        if val_sessions and d in val_set:
-            val_X.append(X)
-            val_y.append(y)
-            val_hit += nhit
-            val_bg += nbg
-            tag = "[VAL]"
-        else:
-            train_X.append(X)
-            train_y.append(y)
-            train_names.append(d)
-            train_hit += nhit
-            train_bg += nbg
-            is_neg = neg_sessions and d in neg_set
-            train_neg_mask.append(np.full(len(y), is_neg, dtype=bool))
-            tag = "[TRAIN-NEG]" if is_neg else "[TRAIN]"
-
-        print(f"  {tag} {d:25s}: {X.shape[0]:5d} 窗口, hit={nhit:4d}, bg={nbg:4d}")
-
-    if not train_X:
-        print("  [X] 未找到任何数据!")
-        return np.empty((0, 6, WINDOW_FRAMES)), np.empty((0,))
-
-    # ── 平衡训练集 (按 session 均匀抽取负例) ──
-    # 策略: 每个 session 分配均等的负例配额, 用完配额后从其他 session 补足
+def _balance_dataset(train_X: list, train_y: list, train_names: list,
+                     neg_set: set) -> tuple[np.ndarray, np.ndarray]:
+    """
+    平衡训练集: 下采样背景至击打的 2 倍, 按 session 均匀分配配额。
+    neg_set 中的 session 获得 2x 配额。
+    """
     total_hit = sum(int((y == 1).sum()) for y in train_y)
     total_bg = sum(int((y == 0).sum()) for y in train_y)
     total_bg_keep = min(total_bg, total_hit * 2)
@@ -271,68 +205,52 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
     n_sessions = len(train_y)
     rng = np.random.RandomState(42)
 
-    # 1) 计算每个 session 的负例数量
     session_bg_counts = np.array([int((y == 0).sum()) for y in train_y], dtype=int)
     session_hit_counts = np.array([int((y == 1).sum()) for y in train_y], dtype=int)
 
-    # 2) 每 session 的配额: 目标 = total_bg_keep / n_sessions
     base_quota = total_bg_keep // n_sessions
     quota = np.full(n_sessions, base_quota, dtype=int)
-    quota[:total_bg_keep % n_sessions] += 1  # 前 remainder 个 session 各多 1
+    quota[:total_bg_keep % n_sessions] += 1
 
-    # 3) neg_sessions 获得 2x 配额 (上限为实际 bg 数量)
     if neg_set:
         for i, name in enumerate(train_names):
             if name in neg_set:
                 quota[i] = min(session_bg_counts[i], quota[i] * 2)
 
-    # 4) 按配额采样, 不够的 session 全保留
     balanced_X, balanced_y = [], []
     kept_per_session = []
     for i in range(n_sessions):
         X_sess, y_sess = train_X[i], train_y[i]
-        hit_idx_local = np.where(y_sess == 1)[0]
-        bg_idx_local = np.where(y_sess == 0)[0]
+        hit_idx = np.where(y_sess == 1)[0]
+        bg_idx = np.where(y_sess == 0)[0]
 
-        n_bg_keep = min(quota[i], len(bg_idx_local))
-        if n_bg_keep > 0 and len(bg_idx_local) > n_bg_keep:
-            keep_bg = rng.choice(bg_idx_local, n_bg_keep, replace=False)
+        n_bg_keep = min(quota[i], len(bg_idx))
+        if n_bg_keep > 0 and len(bg_idx) > n_bg_keep:
+            keep_bg = rng.choice(bg_idx, n_bg_keep, replace=False)
         else:
-            keep_bg = bg_idx_local
+            keep_bg = bg_idx
 
-        keep = np.concatenate([hit_idx_local, keep_bg])
-        keep.sort()
+        keep = np.concatenate([hit_idx, keep_bg]); keep.sort()
         balanced_X.append(X_sess[keep])
         balanced_y.append(y_sess[keep])
         kept_per_session.append(len(keep_bg))
 
-    # 5) 如果配额没用完 (某些 session bg 太少), 从有余量的 session 补足
+    # deficit redistribution
     deficit = total_bg_keep - sum(kept_per_session)
     if deficit > 0:
-        surplus_sessions = [i for i in range(n_sessions)
-                           if kept_per_session[i] < session_bg_counts[i]]
-        if surplus_sessions:
-            # 从每个有余量的 session 等比例补充
-            total_surplus = sum(session_bg_counts[i] - kept_per_session[i]
-                               for i in surplus_sessions)
+        surplus = [i for i in range(n_sessions) if kept_per_session[i] < session_bg_counts[i]]
+        if surplus:
+            total_surplus = sum(session_bg_counts[i] - kept_per_session[i] for i in surplus)
             remaining = deficit
-            for i in surplus_sessions:
+            for i in surplus:
                 avail = session_bg_counts[i] - kept_per_session[i]
                 n_extra = min(avail, int(deficit * avail / total_surplus) + 1)
                 n_extra = min(n_extra, remaining)
                 if n_extra > 0:
-                    X_sess = train_X[i]
-                    y_sess = train_y[i]
-                    bg_idx_local = np.where(y_sess == 0)[0]
-                    # 排除已保留的
-                    kept_set = set(kept_per_session[:i])  # 简化: 重新采样
-                    # 直接追加额外 bg (不排除已选的, 允许轻微重复)
-                    extra_bg = rng.choice(bg_idx_local, min(n_extra, len(bg_idx_local)),
-                                          replace=False)
-                    balanced_X[i] = np.concatenate([balanced_X[i],
-                        X_sess[extra_bg]])
-                    balanced_y[i] = np.concatenate([balanced_y[i],
-                        np.zeros(len(extra_bg), dtype=y_sess.dtype)])
+                    bg_idx = np.where(train_y[i] == 0)[0]
+                    extra_bg = rng.choice(bg_idx, min(n_extra, len(bg_idx)), replace=False)
+                    balanced_X[i] = np.concatenate([balanced_X[i], train_X[i][extra_bg]])
+                    balanced_y[i] = np.concatenate([balanced_y[i], np.zeros(len(extra_bg), dtype=train_y[i].dtype)])
                     kept_per_session[i] += len(extra_bg)
                     remaining -= len(extra_bg)
 
@@ -347,21 +265,11 @@ def build_dataset(data_dir: str, val_sessions: list[str] | None = None,
               f"  (hit={session_hit_counts[i]:4d}){tag}")
 
     print(f"  X_train: {X_train.shape}  y_train: {y_train.shape}")
-
-    # ── 验证集 (不采样, 保持原始分布) ──
-    if val_X:
-        X_val = np.concatenate(val_X)
-        y_val = np.concatenate(val_y)
-        print(f"  X_val:   {X_val.shape}  y_val:   {y_val.shape}  "
-              f"(hit={val_hit}, bg={val_bg})")
-        return X_train, y_train, X_val, y_val
-
-    print(f"  (无独立验证集, 将随机分割)")
     return X_train, y_train
 
 
 # ============================================================================
-# 六、模型定义
+# 二、模型定义
 # ============================================================================
 
 def build_inception_time(dls, nf: int = 32, depth: int = 4):
@@ -551,13 +459,15 @@ def build_tst(dls):
 
 
 # ============================================================================
-# 七、训练流程
+# 三、训练流程
 # ============================================================================
 
 def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
           epochs: int = 70, batch_size: int = 64, lr: float = 1e-3,
           save_dir: str = "models", focal_gamma: float = 0,
-          X_val: np.ndarray | None = None, y_val: np.ndarray | None = None):
+          X_val: np.ndarray | None = None, y_val: np.ndarray | None = None,
+          preproc_mean: np.ndarray | None = None,
+          preproc_std: np.ndarray | None = None):
     """
     完整训练流程:
       1. 标准化 (每通道 Z-score)
@@ -589,17 +499,24 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
 
     y = y.astype(np.int64)
 
-    # ── 7.1 标准化 ──
-    # 用训练集的 mean/std, 验证集也照此标准化
-    mean = X.mean(axis=(0, 2), keepdims=True)   # (1, 6, 1)
-    std = X.std(axis=(0, 2), keepdims=True) + 1e-8
+    # ── 3.1 标准化 ──
+    # 优先使用 slice_dataset.py 预计算的统计量, 否则从训练集计算
+    if preproc_mean is not None and preproc_std is not None:
+        # preproc_mean/std 来自 preproc.npz, shape (6,) → reshape 为 (1, 6, 1)
+        mean = preproc_mean.reshape(1, -1, 1)
+        std = preproc_std.reshape(1, -1, 1)
+        print(f"  [标准化] 使用预计算 mean/std (来自 preproc.npz)")
+    else:
+        mean = X.mean(axis=(0, 2), keepdims=True)   # (1, 6, 1)
+        std = X.std(axis=(0, 2), keepdims=True) + 1e-8
+        print(f"  [标准化] 从训练集计算 mean/std")
     X = (X - mean) / std
 
     if X_val is not None and y_val is not None:
         y_val = y_val.astype(np.int64)
         X_val = (X_val - mean) / std
 
-    # ── 7.2 训练/验证分割 ──
+    # ── 3.2 训练/验证分割 ──
     if X_val is not None:
         # Session 级独立验证集: 拼接后按长度分
         X_all = np.concatenate([X, X_val], axis=0)
@@ -613,13 +530,13 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
         X_all, y_all = X, y
         splits = RandomSplitter(valid_pct=0.2, seed=42)(y_all)
         print(f"\n  验证方式: 窗口级随机20%分割 (可能跨 session 泄露!)")
-        print(f"  💡 建议用 --val-sessions 指定独立验证 session")
+        print(f"  提示: 建议用 slice_dataset.py --val-sessions 指定独立验证 session")
 
-    # ── 7.3 构建 tsai DataLoaders ──
+    # ── 3.3 构建 tsai DataLoaders ──
     dls = get_ts_dls(X_all, y_all, splits=splits, bs=batch_size)
     dls.c = 2  # 强制二分类 (tsai 1.0.1 默认将二值标签视为 1 类输出, 需显式设 2)
 
-    # ── 7.4 选择模型 ──
+    # ── 3.4 选择模型 ──
     models = {
         "inception": build_inception_time,
         "fcn": build_fcn,
@@ -632,10 +549,10 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"\n  模型: {model_name}, 参数量: {param_count:,}")
-    print(f"  窗口: {WINDOW_SEC*1000:.0f}ms ({WINDOW_FRAMES}帧 @{TARGET_FS}Hz)")
+    print(f"  窗口: 250ms (15帧 @60Hz)")
     print(f"  训练集: {len(splits[0])}, 验证集: {len(splits[1])}")
 
-    # ── 7.5 Learner (训练器) ──
+    # ── 3.5 Learner (训练器) ──
     # 构建 loss 函数
     if focal_gamma > 0:
         from tsai.all import FocalLoss
@@ -656,11 +573,11 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
     )
     learn.model.to(device)
 
-    # ── 7.6 One-Cycle 学习率策略 ──
+    # ── 3.6 One-Cycle 学习率策略 ──
     # 从 lr/10 升至 lr, 再降至 lr/1000, 帮助模型快速收敛并逃离局部最优
     learn.fit_one_cycle(epochs, lr_max=lr)
 
-    # ── 7.7 评估 ──
+    # ── 3.7 评估 ──
     # Best Model 的指标从 SaveModelCallback 加载后的 learner.validate() 获取
     # learn.final_record 顺序在 fastai 版本间不一致, 直接用验证集预测结果算
     valid_dl = dls.valid
@@ -684,26 +601,49 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
           f"    FN (漏检, 击打被判为非击打) = {cm[1,0]:4d}\n"
           f"    TP (正确检出击打) = {cm[1,1]:4d}")
 
-    # ── 7.8 保存模型 ──
+    # ── 3.8 保存模型 ──
     # 同时保存预处理参数 (mean, std), 推理时需要用相同方式标准化
+    # 窗口/采样率参数是模型架构常量，与 slice_dataset.py 保持一致
     os.makedirs(save_dir, exist_ok=True)
     model_path = os.path.join(save_dir, f"hit_detector_{model_name}.pth")
     torch.save({
         "model_state": model.state_dict(),    # 模型权重
         "model_name": model_name,             # 架构名 (推理时重建用)
-        "mean": mean,                          # 标准化均值 (6,)
-        "std": std,                            # 标准化标准差 (6,)
-        "window_sec": WINDOW_SEC,              # 窗口长度
-        "window_frames": WINDOW_FRAMES,        # 窗口帧数
-        "target_fs": TARGET_FS,                # 采样率
+        "mean": mean,                          # 标准化均值 (1,6,1)
+        "std": std,                            # 标准化标准差 (1,6,1)
+        "window_sec": 0.25,                    # 窗口长度 (250ms)
+        "window_frames": 15,                   # 窗口帧数
+        "target_fs": 60,                       # 采样率
         "channels": 6,                         # 输入通道数
         "classes": 2,                          # 输出类别数
     }, model_path)
     print(f"\n  模型已保存: {model_path}")
 
-    # ── 7.9 绘制训练曲线 ──
+    # ── 3.9 绘制训练曲线 ──
     try:
+        import matplotlib
+        matplotlib.use("Agg")  # 非交互后端, 避免 tk/qt 字体问题
         import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+
+        # ── 字体配置: 优先使用 Windows 清晰字体 ──
+        # 查找可用的优质 sans-serif 字体
+        _preferred = ["Microsoft YaHei", "SimHei", "Arial", "DejaVu Sans"]
+        _available = {f.name for f in font_manager.fontManager.ttflist}
+        _selected = next((f for f in _preferred if f in _available), "sans-serif")
+
+        matplotlib.rcParams.update({
+            "font.family": "sans-serif",
+            "font.sans-serif": [_selected, "DejaVu Sans", "Arial", "sans-serif"],
+            "font.size": 11,
+            "axes.titlesize": 13,
+            "axes.labelsize": 11,
+            "axes.unicode_minus": False,   # 防止负号显示为方块
+            "figure.dpi": 120,
+            "savefig.dpi": 150,
+            "savefig.bbox": "tight",
+        })
+
         rec = learn.recorder
 
         # 用 fastai 内置方法拿到 loss 历史
@@ -713,27 +653,27 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         epochs_arr = range(1, len(train_loss) + 1)
 
-        ax1.plot(epochs_arr, train_loss, "b-", label="Train Loss")
-        ax1.plot(epochs_arr, valid_loss_vals, "r-", label="Valid Loss")
+        ax1.plot(epochs_arr, train_loss, "b-", lw=1.5, label="Train Loss")
+        ax1.plot(epochs_arr, valid_loss_vals, "r-", lw=1.5, label="Valid Loss")
         ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
         ax1.set_title("Loss Curve"); ax1.legend(); ax1.grid(True, alpha=0.3)
 
         # accuracy — rec.values[i] 可能只有2个元素 (无metrics)
         if len(rec.values[0]) >= 3:
             acc = [v[2] for v in rec.values]
-            ax2.plot(epochs_arr, acc, "g-", label="Accuracy")
+            ax2.plot(epochs_arr, acc, "g-", lw=1.5, label="Accuracy")
         else:
-            ax2.text(0.5, 0.5, "accuracy 不可用\n(loss 曲线正常)", ha="center", va="center",
-                     transform=ax2.transAxes, fontsize=14)
+            ax2.text(0.5, 0.5, "accuracy unavailable\n(loss curve is normal)",
+                     ha="center", va="center", transform=ax2.transAxes, fontsize=14)
         ax2.set_xlabel("Epoch"); ax2.set_ylabel("Accuracy")
         ax2.set_title("Validation Accuracy"); ax2.legend(); ax2.grid(True, alpha=0.3)
 
-        fig.suptitle(f"Training Curve — {model_name}")
+        fig.suptitle(f"Training Curve — {model_name}", fontsize=14, weight="bold")
         plt.tight_layout()
         path = os.path.join(save_dir, f"curve_{model_name}.png")
-        plt.savefig(path, dpi=100)
+        plt.savefig(path)
         print(f"  训练曲线: {path}")
-        plt.show()
+        plt.close("all")
     except Exception as e:
         print(f"  [WARN] 绘制曲线失败: {e}")
 
@@ -741,15 +681,15 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
 
 
 # ============================================================================
-# 八、命令行入口
+# 四、命令行入口
 # ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
         description="IMU 击打检测模型训练 (InceptionTime/FCN/LiteCNN/TST)"
     )
-    parser.add_argument("--data_dir", default="train_data",
-                        help="包含 session 子目录的数据目录")
+    parser.add_argument("--data_dir", default="sliced_data",
+                        help="预处理后的数据目录 (slice_dataset.py 的输出, 含 X_train.npy 等)")
     parser.add_argument("--model", default="inception",
                         choices=["inception", "fcn", "lite", "tst"],
                         help="模型架构: inception (推荐), fcn (快速baseline), "
@@ -770,7 +710,7 @@ def main():
                              "这些 session 不参与训练, 用于评估泛化能力. "
                              "留空则随机窗口分割 (可能泄露).")
     parser.add_argument("--neg-sessions", type=str, default="",
-                        help="逗号分隔的负样本 session 名, 例如 'no_move_0,shaking_0'. "
+                        help="逗号分隔的负样本 session 名, 例如 'shaking_0,shaking_1'. "
                              "背景样本在下采样时优先保留, 确保纯负样本不被随机丢弃.")
 
     args = parser.parse_args()
@@ -782,8 +722,6 @@ def main():
 
     print("=" * 55)
     print("  IMU 击打检测 — 训练")
-    print(f"  窗口: {WINDOW_SEC*1000:.0f}ms ({WINDOW_FRAMES}帧 @{TARGET_FS}Hz)")
-    print(f"  击打区: [-{PRE_MS}ms, +{POST_MS}ms]")
     print(f"  模型: {args.model}")
     if args.focal_loss > 0:
         print(f"  Loss:  FocalLoss (gamma={args.focal_loss})")
@@ -793,13 +731,25 @@ def main():
         print(f"  负样本优先: ({', '.join(neg_sessions)})")
     print("=" * 55)
 
-    # 加载数据
-    result = build_dataset(args.data_dir, val_sessions, neg_sessions)
-    if isinstance(result, tuple) and len(result) == 4:
-        X_train, y_train, X_val, y_val = result
+    # 加载预处理数据 (按 session 独立切片)
+    data = load_session_slices(args.data_dir, val_sessions, neg_sessions)
+    X_train, y_train = data["X_train"], data["y_train"]
+    X_val, y_val = data["X_val"], data["y_val"]
+    preproc_mean, preproc_std = data["mean"], data["std"]
+
+    # 打印 preproc 元数据
+    if data["preproc"]:
+        pp = data["preproc"]
+        print(f"  数据格式: {data['format']}")
+        print(f"  窗口: {pp.get('window_frames', '?')} 帧 @{pp.get('target_fs', '?')}Hz "
+              f"({pp.get('window_sec', 0)*1000:.0f}ms)")
+        print(f"  击打区: [-{pp.get('pre_ms', '?')}ms, +{pp.get('post_ms', '?')}ms]")
+        print(f"  X_train: {X_train.shape}  y_train: {X_train.shape}")
+        if X_val is not None:
+            print(f"  X_val:   {X_val.shape}  y_val:   {y_val.shape}")
     else:
-        X_train, y_train = result
-        X_val, y_val = None, None
+        print(f"  数据格式: {data['format']} (无 preproc.npz, 标准化参数将即时计算)")
+        print(f"  X_train: {X_train.shape}  y_train: {y_train.shape}")
 
     if len(X_train) == 0:
         print("  [X] 无数据")
@@ -807,7 +757,8 @@ def main():
 
     # 训练
     train(X_train, y_train, args.model, args.epochs, args.bs, args.lr, args.save_dir,
-          focal_gamma=args.focal_loss, X_val=X_val, y_val=y_val)
+          focal_gamma=args.focal_loss, X_val=X_val, y_val=y_val,
+          preproc_mean=preproc_mean, preproc_std=preproc_std)
 
 
 if __name__ == "__main__":

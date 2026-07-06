@@ -15,6 +15,8 @@
   python realtime_detect.py --calibrate
   python realtime_detect.py --prob-high 0.85 --prob-low 0.4 -v
   python realtime_detect.py --cooldown 500
+  python realtime_detect.py --model model_judge/hit_detector_inception.pth --prob-high 0.85 --prob-low 0.4 --cooldown 200 --plot
+
 """
 
 import sys
@@ -38,8 +40,6 @@ OSC_PORT = 8888
 PROB_HIGH = 0.85              # 概率高阈值 (超过触发)
 PROB_LOW = 0.4                # 概率低阈值 (低于释放滞回)
 COOLDOWN_MS = 400             # 触发后冷却时间 (ms)
-SOUND_FREQ = 800              # 提示音频率 (Hz)
-SOUND_DURATION_MS = 100       # 提示音持续 (ms)
 MODEL_PATH = "models/hit_detector_inception.pth"
 CALIBRATE_SEC = 30            # 校准模式采集秒数
 
@@ -266,24 +266,17 @@ def load_model(model_path: str):
 # ==================== 提示音 ====================
 
 def play_sound(wav_path: str = "1.wav"):
-    """播放触发音效。优先 WAV 文件, 退到系统提示音, 再退到终端 BEL。"""
+    """播放触发音效 (非阻塞, 新声音直接取代旧声音)."""
     try:
         import winsound
         script_dir = os.path.dirname(os.path.abspath(__file__))
         full_path = os.path.join(script_dir, wav_path)
         if os.path.exists(full_path):
+            # SND_ASYNC: 立即返回不阻塞; Windows 会自动停止上一个 PlaySound
             winsound.PlaySound(full_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
             return
     except Exception:
         pass
-    # fallback 1: 系统音效
-    try:
-        import winsound
-        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-    except Exception:
-        pass
-    # fallback 2: 终端响铃
-    print("\a", end="", flush=True)
 
 
 # ==================== 实时检测器 ====================
@@ -304,8 +297,7 @@ class RealtimeDetector:
                  prob_high: float = 0.85,
                  prob_low: float = 0.4,
                  cooldown_ms: int = 400,
-                 sound_freq: int = 800,
-                 sound_dur: int = 100):
+                 sound_wav: str = "1.wav"):
         self.model = model
         self.mean = mean
         self.std = std
@@ -314,8 +306,7 @@ class RealtimeDetector:
         self.prob_high = prob_high
         self.prob_low = prob_low
         self.cooldown_s = cooldown_ms / 1000.0
-        self.sound_freq = sound_freq
-        self.sound_dur = sound_dur
+        self.sound_wav = sound_wav
 
         # 环形缓冲: 最新的 window_frames 帧 IMU
         self.buffer: deque = deque(maxlen=window_frames)
@@ -420,11 +411,7 @@ class RealtimeDetector:
                     print(f"\n  DETECT! (#{self.total_triggers}) | "
                           f"P(hit)={prob:.3f} > {self.prob_high}")
 
-                    threading.Thread(
-                        target=play_beep,
-                        args=(self.sound_freq, self.sound_dur),
-                        daemon=True,
-                    ).start()
+                    play_sound(self.sound_wav)
 
                     self.last_trigger_time = now
             else:
@@ -619,11 +606,7 @@ class SimpleDetector:
                           f"ratio={ratio:.1f} mag={mag:.2f}g jerk={jerk:+.2f} | "
                           f"s={short:.2f}g l={long:.2f}g")
 
-                    threading.Thread(
-                        target=play_sound,
-                        args=(self.sound_wav,),
-                        daemon=True,
-                    ).start()
+                    play_sound(self.sound_wav)
 
                     self.last_trigger_time = now
                     self.trigger_frames.append(self.total_frames)
@@ -763,10 +746,8 @@ def main():
                         help=f"概率低阈值, 低于释放滞回 (默认: {PROB_LOW})")
     parser.add_argument("--cooldown", type=int, default=COOLDOWN_MS,
                         help=f"触发后冷却 ms (默认: {COOLDOWN_MS})")
-    parser.add_argument("--freq", type=int, default=SOUND_FREQ,
-                        help=f"提示音频率 Hz (默认: {SOUND_FREQ})")
-    parser.add_argument("--sound-ms", type=int, default=SOUND_DURATION_MS,
-                        help=f"提示音持续 ms (默认: {SOUND_DURATION_MS})")
+    parser.add_argument("--sound-wav", type=str, default="1.wav",
+                        help="触发音效 WAV 文件 (默认: 1.wav)")
     parser.add_argument("--debug", action="store_true",
                         help="调试模式: 打印收到的 OSC 原始数据")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -786,8 +767,6 @@ def main():
                         help="简单模式: mag 最低阈值 g (默认 0.3)")
     parser.add_argument("--jerk-thresh", type=float, default=0.5,
                         help="简单模式: jerk 快速通道阈值 g/帧 (默认 0.5)")
-    parser.add_argument("--sound-wav", type=str, default="1.wav",
-                        help="简单模式: 触发音效 WAV 文件 (默认 1.wav)")
 
     args = parser.parse_args()
 
@@ -816,8 +795,7 @@ def main():
             prob_high=args.prob_high,
             prob_low=args.prob_low,
             cooldown_ms=args.cooldown,
-            sound_freq=args.freq,
-            sound_dur=args.sound_ms,
+            sound_wav=args.sound_wav,
         )
 
     # 3. 启动 OSC 监听
