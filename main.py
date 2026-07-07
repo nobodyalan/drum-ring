@@ -4,6 +4,10 @@ import os
 os.environ["QT_API"] = "pyqt6"
 import asyncio
 
+from qt_bootstrap import configure_qt_plugin_path
+
+configure_qt_plugin_path()
+
 from qasync import QEventLoop
 
 from PyQt6.QtWidgets import QApplication

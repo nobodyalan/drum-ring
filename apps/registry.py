@@ -15,9 +15,16 @@ class AppLaunchSpec:
 APP_LAUNCH_SPECS: tuple[AppLaunchSpec, ...] = (
     AppLaunchSpec("demo", "示范应用", "apps/demo_processor_app.py", "apps.demo_processor_app"),
     AppLaunchSpec("imu_visualizer", "IMU 可视化", "apps/imu_visualizer_app.py", "apps.imu_visualizer_app"),
+    AppLaunchSpec(
+        "pressure_imu_visualizer",
+        "压力+IMU",
+        "apps/pressure_imu_visualizer_app.py",
+        "apps.pressure_imu_visualizer_app",
+    ),
     AppLaunchSpec("audio_monitor", "音频监控", "apps/audio_monitor_app.py", "apps.audio_monitor_app"),
     AppLaunchSpec("recorder", "录制中心", "apps/recorder_app.py", "apps.recorder_app"),
     AppLaunchSpec("gesture_recognition", "手势识别", "apps/gesture_recognition_app.py", "apps.gesture_recognition_app"),
+    AppLaunchSpec("drum_gesture", "Drum Gesture", "apps/drum_gesture_app.py", "apps.drum_gesture_app"),
     AppLaunchSpec("touchpad", "触控板", "apps/touchpad_app.py", "apps.touchpad_app"),
     AppLaunchSpec("unified_gesture", "综合识别", "apps/unified_gesture_app.py", "apps.unified_gesture_app"),
     AppLaunchSpec("handwriting_demo", "Handwriting Demo", "apps/handwriting_demo_app.py", "apps.handwriting_demo_app"),
