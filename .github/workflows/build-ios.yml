@@ -28,20 +28,22 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
-      # ── 4. 编译 + 打包 IPA (ad-hoc 签名，AltStore 安装时会重签) ──
+      # ── 4. 编译 + 打包 IPA ──
+      # 策略：xcodebuild 不签名编译 (避开 Xcode 26.5 禁 ad-hoc 的限制)
+      #       编译完后用 codesign 手动加 ad-hoc 签名 (AltStore 能识别)
+      #       AltStore 安装时会用自己的 Apple ID 重新签名
       - name: Build and Package IPA
         run: |
-          # 使用 ad-hoc 签名 (-) 编译，不依赖 Apple ID
-          # AltStore 安装时会用自己的 Apple ID 重新签名
+          # 第一步：编译但不签名
           xcodebuild build \
             -project DrumHit.xcodeproj \
             -scheme DrumHit \
             -sdk iphoneos \
             -configuration Release \
             -derivedDataPath ./DerivedData \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=YES \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
           # 找到编译好的 .app
@@ -53,7 +55,12 @@ jobs:
             exit 1
           fi
 
-          # 手动打包成 IPA
+          # 第二步：手动 ad-hoc 签名 (codesign 不受 xcodebuild SDK 检查限制)
+          echo "正在添加 ad-hoc 签名..."
+          codesign --force --sign - --timestamp=none "$APP_PATH"
+          echo "✅ ad-hoc 签名完成"
+
+          # 第三步：打包成 IPA
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r DrumHit.ipa Payload/
