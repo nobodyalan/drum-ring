@@ -236,3 +236,7 @@ model_train/models_*/
 model_train/train_data/
 model_train/new_data/
 model_train/sliced_data/
+
+# CoreML CI 生成产物 (本地开发时为空)
+ios_develop/Generated/*
+!ios_develop/Generated/.gitkeep

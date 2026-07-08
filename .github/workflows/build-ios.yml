@@ -18,22 +18,60 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ── 2. 安装 XcodeGen ──
+      # ── 2. 编译 CoreML 模型 → Swift 源码 + .mlmodelc ──
+      # Xcode 26 不再自动编译旧 .mlmodel (neuralnetwork) 格式
+      # 用手动编译绕过：coremlc generate → Swift 类 + coremlc compile → .mlmodelc
+      - name: Compile CoreML Model
+        run: |
+          set -e
+          MODEL_PATH="ios_develop/HitDetector.mlmodel"
+          GEN_DIR="ios_develop/Generated"
+          rm -rf "$GEN_DIR"
+          mkdir -p "$GEN_DIR"
+
+          echo "模型文件: $(ls -lh "$MODEL_PATH")"
+          echo "模型格式: $(file "$MODEL_PATH")"
+
+          # ① 生成 Swift 接口类 (HitDetector)
+          xcrun coremlc generate "$MODEL_PATH" "$GEN_DIR" \
+            --language Swift \
+            --swift-version 5 \
+            --platform ios \
+            --deployment-target 16.0
+          echo ""
+          echo "=== 生成的 Swift 文件 ==="
+          ls -la "$GEN_DIR/"*.swift
+
+          # ② 编译模型为 .mlmodelc (运行时资源)
+          xcrun coremlc compile "$MODEL_PATH" "$GEN_DIR/"
+          echo ""
+          echo "=== 编译后的模型 ==="
+          ls -laR "$GEN_DIR/HitDetector.mlmodelc"
+
+          # ③ 从 project.yml 中删除 .mlmodel (CI 不依赖 Xcode 编译模型)
+          sed -i '' '/- path: ios_develop\/HitDetector.mlmodel/d' project.yml
+          echo ""
+          echo "=== 更新后的 project.yml (resources) ==="
+          sed -n '/resources:/,/settings:/p' project.yml
+
+      # ── 3. 安装 XcodeGen ──
       - name: Install XcodeGen
         run: brew install xcodegen
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
 
-      # ── 3. 生成 .xcodeproj ──
+      # ── 4. 生成 .xcodeproj ──
       - name: Generate Xcode Project
         run: xcodegen generate
 
-      # ── 4. 编译 + 打包 IPA ──
+      # ── 5. 编译 + 打包 IPA ──
       # 策略：xcodebuild 不签名编译 (避开 Xcode 26.5 禁 ad-hoc 的限制)
       #       编译完后用 codesign 手动加 ad-hoc 签名 (AltStore 能识别)
       #       AltStore 安装时会用自己的 Apple ID 重新签名
       - name: Build and Package IPA
         run: |
+          set -e  # 任何命令失败立即退出
+
           # 第一步：编译但不签名
           xcodebuild build \
             -project DrumHit.xcodeproj \
@@ -55,39 +93,33 @@ jobs:
             exit 1
           fi
 
-          # 调试：打印 .app 结构
+          # 验证 .app 完整性
           echo ""
-          echo "========== .app 目录结构 =========="
-          ls -laR "$APP_PATH"
-          echo ""
-          echo "========== Info.plist 完整内容 =========="
+          echo "========== Info.plist =========="
           plutil -p "$APP_PATH/Info.plist"
           echo ""
-          echo "========== 可执行文件信息 =========="
           EXEC_NAME=$(plutil -extract CFBundleExecutable raw "$APP_PATH/Info.plist" 2>/dev/null || echo "")
           echo "CFBundleExecutable: '$EXEC_NAME'"
-          if [ -n "$EXEC_NAME" ] && [ -f "$APP_PATH/$EXEC_NAME" ]; then
-            file "$APP_PATH/$EXEC_NAME"
-            echo "架构:"
-            lipo -info "$APP_PATH/$EXEC_NAME" 2>/dev/null || echo "(lipo 不可用)"
-          else
-            echo "⚠️ 可执行文件不存在: $APP_PATH/$EXEC_NAME"
+          if [ -z "$EXEC_NAME" ] || [ ! -f "$APP_PATH/$EXEC_NAME" ]; then
+            echo "❌ 可执行文件缺失，编译可能失败！"
+            exit 1
           fi
-          echo ""
-          echo "========== 签名状态 (签名前) =========="
-          codesign -dvvv "$APP_PATH" 2>&1 || echo "(无签名信息)"
+          echo "✅ 可执行文件存在: $(file "$APP_PATH/$EXEC_NAME")"
 
-          # 第二步：手动 ad-hoc 签名 (codesign 不受 xcodebuild SDK 检查限制)
+          # 第二步：手动复制 .mlmodelc 到 app bundle
+          # (不依赖 xcodegen 的目录资源处理，100% 可控)
           echo ""
+          echo "正在复制编译后的模型到 .app..."
+          cp -R "ios_develop/Generated/HitDetector.mlmodelc" "$APP_PATH/"
+          echo "✅ .mlmodelc 已添加:"
+          ls -laR "$APP_PATH/HitDetector.mlmodelc"
+
+          # 第三步：手动 ad-hoc 签名
           echo "正在添加 ad-hoc 签名..."
           codesign --force --sign - --timestamp=none "$APP_PATH"
           echo "✅ ad-hoc 签名完成"
 
-          echo ""
-          echo "========== 签名状态 (签名后) =========="
-          codesign -dvvv "$APP_PATH" 2>&1 || echo "(签名验证失败)"
-
-          # 第三步：打包成 IPA
+          # 第四步：打包成 IPA
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r DrumHit.ipa Payload/
@@ -95,7 +127,7 @@ jobs:
           ls -lh DrumHit.ipa
           echo "✅ IPA 生成成功"
 
-      # ── 5. 上传 IPA ──
+      # ── 6. 上传 IPA ──
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:

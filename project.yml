@@ -21,13 +21,17 @@ targets:
     platform: iOS
 
     sources:
-      # 所有 Swift 源文件
+      # 所有 Swift 源文件 (手写)
       - path: ios_develop/DrumHitApp
+        includes:
+          - "*.swift"
+      # CI 自动生成: CoreML Swift 接口 (平时为空目录，CI 中由 coremlcompiler 生成)
+      - path: ios_develop/Generated
         includes:
           - "*.swift"
 
     resources:
-      # CoreML 模型
+      # CoreML 模型: 本地开发用 .mlmodel (Xcode 自动编译) / CI 用 .mlmodelc
       - path: ios_develop/HitDetector.mlmodel
       # 音效文件
       - path: ios_develop/DrumHitApp/hit.wav
