@@ -98,13 +98,16 @@ jobs:
           echo "========== Info.plist =========="
           plutil -p "$APP_PATH/Info.plist"
           echo ""
-          EXEC_NAME=$(plutil -extract CFBundleExecutable raw "$APP_PATH/Info.plist" 2>/dev/null || echo "")
-          echo "CFBundleExecutable: '$EXEC_NAME'"
-          if [ -z "$EXEC_NAME" ] || [ ! -f "$APP_PATH/$EXEC_NAME" ]; then
-            echo "❌ 可执行文件缺失，编译可能失败！"
+          echo "========== .app 内容 =========="
+          ls -la "$APP_PATH/"
+          echo ""
+          # 检查可执行文件 (命名为 target 名 DrumHit)
+          if [ -f "$APP_PATH/DrumHit" ]; then
+            echo "✅ 可执行文件存在: $(file "$APP_PATH/DrumHit")"
+          else
+            echo "❌ 可执行文件 DrumHit 缺失！"
             exit 1
           fi
-          echo "✅ 可执行文件存在: $(file "$APP_PATH/$EXEC_NAME")"
 
           # 第二步：手动复制 .mlmodelc 到 app bundle
           # (不依赖 xcodegen 的目录资源处理，100% 可控)
