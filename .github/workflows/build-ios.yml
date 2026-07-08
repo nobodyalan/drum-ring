@@ -31,16 +31,17 @@ jobs:
       # ── 4. 编译 + 打包 IPA (ad-hoc 签名，AltStore 安装时会重签) ──
       - name: Build and Package IPA
         run: |
-          # 编译 (跳过签名 — AltStore 安装时会签名)
+          # 使用 ad-hoc 签名 (-) 编译，不依赖 Apple ID
+          # AltStore 安装时会用自己的 Apple ID 重新签名
           xcodebuild build \
             -project DrumHit.xcodeproj \
             -scheme DrumHit \
             -sdk iphoneos \
             -configuration Release \
             -derivedDataPath ./DerivedData \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
           # 找到编译好的 .app
