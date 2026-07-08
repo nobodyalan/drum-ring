@@ -1,0 +1,51 @@
+# =============================================================================
+# XcodeGen 项目描述文件 — 在 macOS 上一键生成 .xcodeproj
+# 用法: xcodegen generate
+# =============================================================================
+name: DrumHit
+
+options:
+  bundleIdPrefix: com.drumhit
+  deploymentTarget:
+    iOS: "16.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  DrumHit:
+    type: application
+    platform: iOS
+
+    sources:
+      # 所有 Swift 源文件
+      - path: ios_develop/DrumHitApp
+        includes:
+          - "*.swift"
+
+    resources:
+      # CoreML 模型
+      - path: ios_develop/HitDetector.mlmodel
+      # 音效文件
+      - path: ios_develop/DrumHitApp/hit.wav
+      # 预处理参数 JSON
+      - path: ios_develop/DrumHitApp/preproc_params.json
+
+    settings:
+      base:
+        INFOPLIST_FILE: ios_develop/DrumHitApp/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.drumhit.app
+        # 自动签名 — 开发证书 (免费 Apple ID 即可，CI 中由 GitHub Secrets 提供)
+        CODE_SIGN_STYLE: Automatic
+        # 编译为单一架构 (arm64)，加快 CI 速度
+        ONLY_ACTIVE_ARCH: "YES"
+        # Swift 版本
+        SWIFT_VERSION: "5.0"
+        # 支持 iOS 16+
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+    # 无需第三方依赖，全部使用 Apple 内置框架
+    dependencies: []
