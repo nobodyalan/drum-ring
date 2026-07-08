@@ -1,24 +1,17 @@
 # =============================================================================
 # GitHub Actions — 免费 macOS 虚拟机自动编译 iOS IPA
 # =============================================================================
-# 触发方式:
-#   1. git push 到 main 分支 → 自动编译
-#   2. 手动触发: Actions 页面 → "Build iOS App" → "Run workflow"
-#
-# 首次配置需要在 GitHub 仓库的 Settings → Secrets and variables → Actions
-# 添加以下 Secret:
-#   APPLE_ID          = your@email.com      (你的 Apple ID 邮箱)
-#   APPLE_ID_PASSWORD = xxxx-xxxx-xxxx-xxxx (App 专用密码，不是 Apple ID 密码)
+# 不需要 Apple ID，不需要付费开发者账号！
+# CI 编译出未签名的 IPA → 下载后用 AltStore 签名安装
 # =============================================================================
 name: "Build iOS App"
 
 on:
-  # 改为纯手动触发，方便调试（等通过后再加回 push 自动触发）
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发
 
 jobs:
   build:
-    runs-on: macos-latest # 免费 macOS 虚拟机 (Intel 或 Apple Silicon)
+    runs-on: macos-latest
 
     steps:
       # ── 1. 检出代码 ──
@@ -35,55 +28,38 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
-      # ── 4. 创建导出配置 (development 方式，免费 Apple ID 可用) ──
-      - name: Create Export Options
+      # ── 4. 编译 + 打包 IPA (ad-hoc 签名，AltStore 安装时会重签) ──
+      - name: Build and Package IPA
         run: |
-          cat > exportOptions.plist << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>development</string>
-              <key>uploadBitcode</key>
-              <false/>
-              <key>uploadSymbols</key>
-              <false/>
-              <key>compileBitcode</key>
-              <false/>
-          </dict>
-          </plist>
-          EOF
-
-      # ── 5. 编译 + 签名 + 导出 IPA ──
-      - name: Build and Export IPA
-        run: |
-          xcodebuild archive \
+          # 编译 (ad-hoc 签名，不需要开发者账号)
+          xcodebuild build \
             -project DrumHit.xcodeproj \
             -scheme DrumHit \
             -sdk iphoneos \
             -configuration Release \
-            -archivePath ./build/DrumHit.xcarchive \
-            -authenticationAppleID "${{ secrets.APPLE_ID }}" \
-            -authenticationPassword "${{ secrets.APPLE_ID_PASSWORD }}" \
-            -allowProvisioningUpdates | tee build.log
+            -derivedDataPath ./DerivedData \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            ONLY_ACTIVE_ARCH=NO | tee build.log
 
-          xcodebuild -exportArchive \
-            -archivePath ./build/DrumHit.xcarchive \
-            -exportPath ./build/export \
-            -exportOptionsPlist exportOptions.plist \
-            -authenticationAppleID "${{ secrets.APPLE_ID }}" \
-            -authenticationPassword "${{ secrets.APPLE_ID_PASSWORD }}" \
-            -allowProvisioningUpdates | tee export.log
+          # 找到编译好的 .app
+          APP_PATH=$(find ./DerivedData -name "DrumHit.app" -type d | head -1)
+          echo "App 路径: $APP_PATH"
 
-          # 找到生成的 IPA
-          IPA_PATH=$(find ./build/export -name "*.ipa" | head -1)
-          echo "IPA 文件: $IPA_PATH"
-          cp "$IPA_PATH" ./DrumHit.ipa
-          ls -lh ./DrumHit.ipa
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ 未找到 .app 文件！"
+            exit 1
+          fi
 
-      # ── 6. 上传 IPA 作为构建产物 ──
+          # 手动打包成 IPA
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r DrumHit.ipa Payload/
+          rm -rf Payload
+          ls -lh DrumHit.ipa
+          echo "✅ IPA 生成成功"
+
+      # ── 5. 上传 IPA ──
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:

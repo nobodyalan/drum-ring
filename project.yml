@@ -38,8 +38,9 @@ targets:
       base:
         INFOPLIST_FILE: ios_develop/DrumHitApp/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.drumhit.app
-        # 自动签名 — 开发证书 (免费 Apple ID 即可，CI 中由 GitHub Secrets 提供)
-        CODE_SIGN_STYLE: Automatic
+        # 手动签名 — CI 使用 ad-hoc 签名 (CODE_SIGN_IDENTITY="-")
+        # AltStore 安装时会自动用你的 Apple ID 重新签名
+        CODE_SIGN_STYLE: Manual
         # 编译为单一架构 (arm64)，加快 CI 速度
         ONLY_ACTIVE_ARCH: "YES"
         # Swift 版本
