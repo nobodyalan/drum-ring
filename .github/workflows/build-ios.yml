@@ -55,10 +55,37 @@ jobs:
             exit 1
           fi
 
+          # 调试：打印 .app 结构
+          echo ""
+          echo "========== .app 目录结构 =========="
+          ls -laR "$APP_PATH"
+          echo ""
+          echo "========== Info.plist 完整内容 =========="
+          plutil -p "$APP_PATH/Info.plist"
+          echo ""
+          echo "========== 可执行文件信息 =========="
+          EXEC_NAME=$(plutil -extract CFBundleExecutable raw "$APP_PATH/Info.plist" 2>/dev/null || echo "")
+          echo "CFBundleExecutable: '$EXEC_NAME'"
+          if [ -n "$EXEC_NAME" ] && [ -f "$APP_PATH/$EXEC_NAME" ]; then
+            file "$APP_PATH/$EXEC_NAME"
+            echo "架构:"
+            lipo -info "$APP_PATH/$EXEC_NAME" 2>/dev/null || echo "(lipo 不可用)"
+          else
+            echo "⚠️ 可执行文件不存在: $APP_PATH/$EXEC_NAME"
+          fi
+          echo ""
+          echo "========== 签名状态 (签名前) =========="
+          codesign -dvvv "$APP_PATH" 2>&1 || echo "(无签名信息)"
+
           # 第二步：手动 ad-hoc 签名 (codesign 不受 xcodebuild SDK 检查限制)
+          echo ""
           echo "正在添加 ad-hoc 签名..."
           codesign --force --sign - --timestamp=none "$APP_PATH"
           echo "✅ ad-hoc 签名完成"
+
+          echo ""
+          echo "========== 签名状态 (签名后) =========="
+          codesign -dvvv "$APP_PATH" 2>&1 || echo "(签名验证失败)"
 
           # 第三步：打包成 IPA
           mkdir -p Payload

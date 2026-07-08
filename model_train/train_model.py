@@ -215,7 +215,7 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
     if neg_set:
         for i, name in enumerate(train_names):
             if name in neg_set:
-                quota[i] = min(session_bg_counts[i], quota[i] * 2)
+                quota[i] = min(session_bg_counts[i], quota[i] * 3)
 
     balanced_X, balanced_y = [], []
     kept_per_session = []
