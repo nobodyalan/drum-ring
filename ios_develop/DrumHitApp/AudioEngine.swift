@@ -9,7 +9,7 @@ final class AudioEngine {
     private var isStarted = false
 
     /// - Parameter wavName: Bundle 中的 WAV 文件名（不含扩展名），默认 "hit"
-    init(wavName: String = "hit") {
+    init(wavName: String = "1") {
         guard let url = Bundle.main.url(forResource: wavName, withExtension: "wav") else {
             print("[AudioEngine] 未找到 \(wavName).wav")
             return

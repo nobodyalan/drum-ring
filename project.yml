@@ -34,7 +34,7 @@ targets:
       # CoreML 模型: 本地开发用 .mlmodel (Xcode 自动编译) / CI 用 .mlmodelc
       - path: ios_develop/HitDetector.mlmodel
       # 音效文件
-      - path: ios_develop/DrumHitApp/hit.wav
+      - path: 1.wav
       # 预处理参数 JSON
       - path: ios_develop/DrumHitApp/preproc_params.json
 

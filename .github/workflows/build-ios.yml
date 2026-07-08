@@ -109,13 +109,16 @@ jobs:
             exit 1
           fi
 
-          # 第二步：手动复制 .mlmodelc 到 app bundle
-          # (不依赖 xcodegen 的目录资源处理，100% 可控)
+          # 第二步：手动复制所有资源到 app bundle
+          # xcodebuild 在 CODE_SIGNING_ALLOWED=NO 下跳过了资源复制阶段
+          # 手动复制确保 hit.wav / preproc_params.json / .mlmodelc 都在 bundle 中
           echo ""
-          echo "正在复制编译后的模型到 .app..."
+          echo "正在复制资源文件到 .app..."
+          cp "1.wav" "$APP_PATH/"
+          cp "ios_develop/DrumHitApp/preproc_params.json" "$APP_PATH/"
           cp -R "ios_develop/Generated/HitDetector.mlmodelc" "$APP_PATH/"
-          echo "✅ .mlmodelc 已添加:"
-          ls -laR "$APP_PATH/HitDetector.mlmodelc"
+          echo "✅ 资源已添加:"
+          ls -la "$APP_PATH/"
 
           # 第三步：手动 ad-hoc 签名
           echo "正在添加 ad-hoc 签名..."
