@@ -1,0 +1,427 @@
+{
+  "window": 10,
+  "lead_end_offsets": [
+    22,
+    20,
+    18,
+    16
+  ],
+  "peak_search_each_side": 40,
+  "serial_edge": "FALLING",
+  "feature_mode": "rawlin12_handcrafted",
+  "negative_exclusion": {
+    "exclude_before_peak": 30,
+    "exclude_after_peak": 24,
+    "window_overlap_extra_after": 33
+  },
+  "recordings": [
+    {
+      "stamp": "1783342896",
+      "user": "lqw",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342896_lqw_2.npy",
+      "serial_file": "serial_1783342896_lqw_2.csv",
+      "raw_samples": 14040,
+      "serial_events": 200,
+      "usable_peaks": 200,
+      "positive_windows": 800,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 2918,
+      "peak_minus_event_samples_mean": -15.372271730035104
+    },
+    {
+      "stamp": "1783342975",
+      "user": "lqw",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342975_lqw_3.npy",
+      "serial_file": "serial_1783342975_lqw_3.csv",
+      "raw_samples": 13960,
+      "serial_events": 170,
+      "usable_peaks": 170,
+      "positive_windows": 680,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 3072,
+      "peak_minus_event_samples_mean": 16.0542026981215
+    },
+    {
+      "stamp": "1783343103",
+      "user": "lqw",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343103_lqw_3.npy",
+      "serial_file": "serial_1783343103_lqw_3.csv",
+      "raw_samples": 3810,
+      "serial_events": 31,
+      "usable_peaks": 31,
+      "positive_windows": 124,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 1817,
+      "peak_minus_event_samples_mean": -7.6791751876133105
+    },
+    {
+      "stamp": "1783343136",
+      "user": "lqw",
+      "label": 4,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343136_lqw_4.npy",
+      "serial_file": "serial_1783343136_lqw_4.csv",
+      "raw_samples": 17400,
+      "serial_events": 209,
+      "usable_peaks": 209,
+      "positive_windows": 836,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 4015,
+      "peak_minus_event_samples_mean": -12.104183711705714
+    },
+    {
+      "stamp": "1783343401",
+      "user": "zhy",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343401_zhy_1.npy",
+      "serial_file": "serial_1783343401_zhy_1.csv",
+      "raw_samples": 19310,
+      "serial_events": 201,
+      "usable_peaks": 201,
+      "positive_windows": 804,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 6437,
+      "peak_minus_event_samples_mean": -23.0037518699926
+    },
+    {
+      "stamp": "1783343503",
+      "user": "zhy",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343503_zhy_2.npy",
+      "serial_file": "serial_1783343503_zhy_2.csv",
+      "raw_samples": 17040,
+      "serial_events": 201,
+      "usable_peaks": 201,
+      "positive_windows": 804,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 4167,
+      "peak_minus_event_samples_mean": -24.051585741433392
+    },
+    {
+      "stamp": "1783343599",
+      "user": "zhy",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343599_zhy_3.npy",
+      "serial_file": "serial_1783343599_zhy_3.csv",
+      "raw_samples": 18050,
+      "serial_events": 201,
+      "usable_peaks": 201,
+      "positive_windows": 804,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 5177,
+      "peak_minus_event_samples_mean": 5.436592651327278
+    },
+    {
+      "stamp": "1783343717",
+      "user": "zhy",
+      "label": 4,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343717_zhy_4.npy",
+      "serial_file": "serial_1783343717_zhy_4.csv",
+      "raw_samples": 17530,
+      "serial_events": 200,
+      "usable_peaks": 200,
+      "positive_windows": 800,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 4721,
+      "peak_minus_event_samples_mean": -11.33336134939073
+    },
+    {
+      "stamp": "1783344510",
+      "user": "whr",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783344510_whr_1.npy",
+      "serial_file": "serial_1783344510_whr_1.csv",
+      "raw_samples": 35450,
+      "serial_events": 202,
+      "usable_peaks": 202,
+      "positive_windows": 808,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 22513,
+      "peak_minus_event_samples_mean": -6.240699589607209
+    },
+    {
+      "stamp": "1783344691",
+      "user": "whr",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783344691_whr_2.npy",
+      "serial_file": "serial_1783344691_whr_2.csv",
+      "raw_samples": 29270,
+      "serial_events": 169,
+      "usable_peaks": 169,
+      "positive_windows": 676,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 18446,
+      "peak_minus_event_samples_mean": -28.53242026781306
+    },
+    {
+      "stamp": "1783344879",
+      "user": "whr",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783344879_whr_3.npy",
+      "serial_file": "serial_1783344879_whr_3.csv",
+      "raw_samples": 34060,
+      "serial_events": 202,
+      "usable_peaks": 202,
+      "positive_windows": 808,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 21123,
+      "peak_minus_event_samples_mean": -11.697723381205465
+    },
+    {
+      "stamp": "1783432441",
+      "user": "lqw",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783432441_lqw_1.npy",
+      "serial_file": "serial_1783432441_lqw_1.csv",
+      "raw_samples": 26120,
+      "serial_events": 209,
+      "usable_peaks": 209,
+      "positive_windows": 836,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 12735,
+      "peak_minus_event_samples_mean": 8.93474111135297
+    },
+    {
+      "stamp": "1783432579",
+      "user": "lqw",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783432579_lqw_22.npy",
+      "serial_file": "serial_1783432579_lqw_22.csv",
+      "raw_samples": 27180,
+      "serial_events": 207,
+      "usable_peaks": 207,
+      "positive_windows": 828,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 13923,
+      "peak_minus_event_samples_mean": 1.1729850967189492
+    },
+    {
+      "stamp": "1783435685",
+      "user": "wxt",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783435685_wxt_1.npy",
+      "serial_file": "serial_1783435685_wxt_1.csv",
+      "raw_samples": 22330,
+      "serial_events": 169,
+      "usable_peaks": 169,
+      "positive_windows": 676,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 11697,
+      "peak_minus_event_samples_mean": 11.485518691956454
+    },
+    {
+      "stamp": "1783435801",
+      "user": "wxt",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783435801_wxt_2.npy",
+      "serial_file": "serial_1783435801_wxt_2.csv",
+      "raw_samples": 22140,
+      "serial_events": 176,
+      "usable_peaks": 176,
+      "positive_windows": 704,
+      "negative_windows": 160,
+      "safe_negative_end_candidates": 11187,
+      "peak_minus_event_samples_mean": 5.713738650665909
+    }
+  ],
+  "x_shape": [
+    13388,
+    21,
+    10
+  ],
+  "label_counts": {
+    "0": 2400,
+    "1": 3124,
+    "2": 3812,
+    "3": 2416,
+    "4": 1636
+  },
+  "skipped_files": [
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342074.npy",
+      "reason": "imu name has no configured label"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342654_lqw_test.npy",
+      "reason": "imu name has no configured label"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342672_lqw_test.npy",
+      "reason": "imu name has no configured label"
+    },
+    {
+      "file": "serial_1783342074.csv",
+      "reason": "serial name has no configured label"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783345065_whr_4.npy",
+      "reason": "missing serial csv"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783345354_wxt_1.npy",
+      "reason": "missing serial csv"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783345451_wxt_1.npy",
+      "reason": "missing serial csv"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783345557_wxt_3.npy",
+      "reason": "missing serial csv"
+    },
+    {
+      "file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783345665_wxt_4.npy",
+      "reason": "missing serial csv"
+    }
+  ],
+  "recording_count": 15,
+  "selected_recordings": [
+    {
+      "stamp": "1783342896",
+      "user": "lqw",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342896_lqw_2.npy",
+      "serial_file": "serial_1783342896_lqw_2.csv"
+    },
+    {
+      "stamp": "1783342975",
+      "user": "lqw",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783342975_lqw_3.npy",
+      "serial_file": "serial_1783342975_lqw_3.csv"
+    },
+    {
+      "stamp": "1783343103",
+      "user": "lqw",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343103_lqw_3.npy",
+      "serial_file": "serial_1783343103_lqw_3.csv"
+    },
+    {
+      "stamp": "1783343136",
+      "user": "lqw",
+      "label": 4,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343136_lqw_4.npy",
+      "serial_file": "serial_1783343136_lqw_4.csv"
+    },
+    {
+      "stamp": "1783343401",
+      "user": "zhy",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343401_zhy_1.npy",
+      "serial_file": "serial_1783343401_zhy_1.csv"
+    },
+    {
+      "stamp": "1783343503",
+      "user": "zhy",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343503_zhy_2.npy",
+      "serial_file": "serial_1783343503_zhy_2.csv"
+    },
+    {
+      "stamp": "1783343599",
+      "user": "zhy",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343599_zhy_3.npy",
+      "serial_file": "serial_1783343599_zhy_3.csv"
+    },
+    {
+      "stamp": "1783343717",
+      "user": "zhy",
+      "label": 4,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783343717_zhy_4.npy",
+      "serial_file": "serial_1783343717_zhy_4.csv"
+    },
+    {
+      "stamp": "1783344510",
+      "user": "whr",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783344510_whr_1.npy",
+      "serial_file": "serial_1783344510_whr_1.csv"
+    },
+    {
+      "stamp": "1783344691",
+      "user": "whr",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783344691_whr_2.npy",
+      "serial_file": "serial_1783344691_whr_2.csv"
+    },
+    {
+      "stamp": "1783344879",
+      "user": "whr",
+      "label": 3,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783344879_whr_3.npy",
+      "serial_file": "serial_1783344879_whr_3.csv"
+    },
+    {
+      "stamp": "1783432441",
+      "user": "lqw",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783432441_lqw_1.npy",
+      "serial_file": "serial_1783432441_lqw_1.csv"
+    },
+    {
+      "stamp": "1783432579",
+      "user": "lqw",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783432579_lqw_22.npy",
+      "serial_file": "serial_1783432579_lqw_22.csv"
+    },
+    {
+      "stamp": "1783435685",
+      "user": "wxt",
+      "label": 1,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783435685_wxt_1.npy",
+      "serial_file": "serial_1783435685_wxt_1.csv"
+    },
+    {
+      "stamp": "1783435801",
+      "user": "wxt",
+      "label": 2,
+      "imu_file": "BCL6035F45_4FAAB661-DDFA-315C-01F1-F7FE4F056D19_1783435801_wxt_2.npy",
+      "serial_file": "serial_1783435801_wxt_2.csv"
+    }
+  ],
+  "hard_negatives_per_file": 160,
+  "label_ids": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "source_filter": [],
+  "latest_per_source": false,
+  "label_last_digit": true,
+  "balance_classes": {
+    "enabled": true,
+    "target_per_class": 1636,
+    "before": {
+      "0": 2400,
+      "1": 3124,
+      "2": 3812,
+      "3": 2416,
+      "4": 1636
+    },
+    "after": {
+      "0": 1636,
+      "1": 1636,
+      "2": 1636,
+      "3": 1636,
+      "4": 1636
+    }
+  },
+  "balanced_x_shape": [
+    8180,
+    21,
+    10
+  ],
+  "balanced_label_counts": {
+    "0": 1636,
+    "1": 1636,
+    "2": 1636,
+    "3": 1636,
+    "4": 1636
+  }
+}
