@@ -50,11 +50,11 @@ CALIBRATE_SEC = 30            # 校准模式采集秒数
 def parse_osc_bundle(raw: bytes) -> tuple:
     """
     解析 OSC Bundle (ZigSim 格式).
-    返回 (gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z)
+    返回 (gyro, accel, quat, grav) 各分量共 13 个 float.
     解析失败时对应通道为 0.
     """
     data = memoryview(raw)
-    acc = gyr = None
+    acc = gyr = quat = grav = None
     try:
         offset = 16 if bytes(data[:8]) == b"#bundle\0" else 0
         is_b = (offset == 16)
@@ -74,24 +74,35 @@ def parse_osc_bundle(raw: bytes) -> tuple:
                 break
             astr = bytes(chunk[:ae]).decode("ascii", errors="replace")
             ao = (ae + 4) & ~3
-            # 类型标签
+            # 类型标签 (如 ",fff" 或 ",ffff")
             te = chunk[ao:].tobytes().find(b"\0")
             if te <= 0:
                 break
+            types = chunk[ao+1:ao+te].tobytes().decode("ascii", errors="replace")
             do = (ao + te + 4) & ~3
-            if do + 12 <= len(chunk):
-                vals = struct.unpack(">fff", chunk[do:do + 12])
+            # 根据类型标签中的 f 数量读取浮点数
+            nf = types.count('f')
+            if nf > 0 and do + nf * 4 <= len(chunk):
+                fmt = ">" + "f" * nf
+                vals = struct.unpack(fmt, chunk[do:do + nf * 4])
                 if "/accel" in astr:
                     acc = (float(vals[0]), float(vals[1]), float(vals[2]))
                 elif "/gyro" in astr:
                     gyr = (float(vals[0]), float(vals[1]), float(vals[2]))
+                elif "/quaternion" in astr or "/quat" in astr:
+                    if nf >= 4:
+                        quat = (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
+                elif "/gravity" in astr or "/grav" in astr:
+                    grav = (float(vals[0]), float(vals[1]), float(vals[2]))
             if not is_b:
                 break
     except Exception:
         pass
     gx, gy, gz = gyr or (0.0, 0.0, 0.0)
     ax, ay, az = acc or (0.0, 0.0, 0.0)
-    return gx, gy, gz, ax, ay, az
+    qx, qy, qz, qw = quat or (0.0, 0.0, 0.0, 0.0)
+    grx, gry, grz = grav or (0.0, 0.0, 0.0)
+    return gx, gy, gz, ax, ay, az, qx, qy, qz, qw, grx, gry, grz
 
 
 # ==================== 模型加载 ====================
@@ -209,9 +220,9 @@ def load_model(model_path: str):
             def __init__(self):
                 super().__init__()
                 self.backbone = InceptionBlock(c_in, nf, depth, ks)
-                # 可学习时序权重 (与 train_model.py 一致)
-                max_t = 15  # window_frames
-                init_w = torch.exp(torch.linspace(0, 2.0, max_t))  # 1.0 → 7.4
+                # 可学习时序权重 (与 train_model.py 一致, 动态适配窗口帧数)
+                n_t = ckpt.get("window_frames", 15)
+                init_w = torch.exp(torch.linspace(0, 2.0, n_t))
                 self.time_weights = nn.Parameter(init_w)
                 self.head = nn.Sequential(
                     nn.Dropout(0.2),
@@ -265,18 +276,36 @@ def load_model(model_path: str):
 
 # ==================== 提示音 ====================
 
-def play_sound(wav_path: str = "1.wav"):
-    """播放触发音效 (非阻塞, 新声音直接取代旧声音)."""
+# WAV 文件路径 (模块加载时解析一次)
+_WAV_PATH: str = ""
+
+def _preload_sound(wav_path: str = "1.wav") -> None:
+    """记录 WAV 文件路径, 并验证可访问."""
+    global _WAV_PATH
+    import os as _os
+    script_dir = _os.path.dirname(_os.path.abspath(__file__))
+    full_path = _os.path.normpath(_os.path.join(script_dir, wav_path))
+    if _os.path.exists(full_path):
+        _WAV_PATH = full_path
+        print(f"[音频] {wav_path} ({_os.path.getsize(full_path)} bytes)")
+    else:
+        print(f"[音频] 未找到: {full_path}")
+
+def play_sound(debug: bool = False):
+    """播放触发音效 (SND_ASYNC 原生支持打断, 新播放自动停止旧声音)."""
+    if not _WAV_PATH:
+        if debug:
+            print("  [SOUND] SKIP: no WAV path")
+        return
     try:
         import winsound
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        full_path = os.path.join(script_dir, wav_path)
-        if os.path.exists(full_path):
-            # SND_ASYNC: 立即返回不阻塞; Windows 会自动停止上一个 PlaySound
-            winsound.PlaySound(full_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            return
-    except Exception:
-        pass
+        # SND_FILENAME|SND_ASYNC: 异步播放, 新调用自动打断旧声音
+        winsound.PlaySound(_WAV_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        if debug:
+            print("  [SOUND] fired")
+    except Exception as e:
+        if debug:
+            print(f"  [SOUND] ERROR: {e}")
 
 
 # ==================== 实时检测器 ====================
@@ -328,34 +357,86 @@ class RealtimeDetector:
         self.running = True
 
     # ---- OSC 线程调用 ----
-    def add_imu_frame(self, gx, gy, gz, ax, ay, az):
-        """线程安全地追加一帧 IMU 数据"""
+    def add_imu_frame(self, gx: float, gy: float, gz: float,
+                      ax: float, ay: float, az: float,
+                      qx: float = 0.0, qy: float = 0.0,
+                      qz: float = 0.0, qw: float = 0.0,
+                      grx: float = 0.0, gry: float = 0.0, grz: float = 0.0):
+        """线程安全地追加一帧 IMU 数据 (原始 13 通道)"""
         with self.lock:
-            self.buffer.append([gx, gy, gz, ax, ay, az])
+            self.buffer.append([gx, gy, gz, ax, ay, az,
+                                qx, qy, qz, qw, grx, gry, grz])
             self.frame_count += 1
 
     # ---- 推理 ----
     def predict(self) -> float:
         """
-        取最近 window_frames 帧 → 标准化 → 模型推理.
+        取最近 window_frames 帧 → 构建特征 → 标准化 → 模型推理.
         返回 softmax 概率 P(hit) ∈ [0, 1].
-        CE Loss 训练出的概率语义跨 session 一致.
+
+        根据模型 checkpoint 中的 channels 数自动选择特征集:
+          - channels=6: 原始 6 轴
+          - channels=9: 6 轴 + accel_mag + gyro_mag + accel_jerk
+          - channels=18: 13 轴 (含 quat+grav) + 5 衍生特征
         """
         with self.lock:
-            window = np.array(list(self.buffer), dtype=np.float32).T  # (6, T)
+            raw = np.array(list(self.buffer), dtype=np.float32)  # (T, 13)
+
+        n_channels = len(self.mean)
+        features = self._build_features(raw, n_channels)  # (C, T)
 
         # Z-score 标准化
-        mean = self.mean.reshape(6, 1)
-        std  = self.std.reshape(6, 1)
-        window_norm = (window - mean) / (std + 1e-8)
+        mean = self.mean.reshape(n_channels, 1)
+        std  = self.std.reshape(n_channels, 1)
+        features_norm = (features - mean) / (std + 1e-8)
 
-        x = torch.from_numpy(window_norm).unsqueeze(0)  # (1, 6, T)
+        x = torch.from_numpy(features_norm).unsqueeze(0)  # (1, C, T)
 
         with torch.no_grad():
             logits = self.model(x)                       # (1, 2)
             prob = torch.softmax(logits, dim=1)[0, 1].item()  # P(hit)
 
         return prob
+
+    @staticmethod
+    def _build_features(raw: "np.ndarray", n_channels: int) -> "np.ndarray":
+        """
+        从原始 13 通道 (gyro+accel+quat+grav) 构建模型需要的特征集.
+
+        通道布局 (raw):
+          [0:3] gyro   [3:6] accel   [6:10] quat   [10:13] gravity
+
+        9 通道模型:  gyro(3)+accel(3)+accel_mag+gyro_mag+accel_jerk
+        18 通道模型: raw(13)+accel_mag+gyro_mag+accel_jerk+vertical_accel+gyro_jerk
+        """
+        ax, ay, az = raw[:, 3], raw[:, 4], raw[:, 5]
+        gx, gy, gz = raw[:, 0], raw[:, 1], raw[:, 2]
+
+        # 基础衍生
+        accel_mag = np.sqrt(ax**2 + ay**2 + az**2)
+        gyro_mag  = np.sqrt(gx**2 + gy**2 + gz**2)
+        accel_jerk = np.diff(accel_mag, prepend=accel_mag[0])
+
+        if n_channels <= 9:
+            # 旧模型: 6 轴 + 3 衍生
+            feats = np.column_stack([
+                raw[:, :6],
+                accel_mag, gyro_mag, accel_jerk,
+            ])
+            return feats.T[:n_channels, :].astype(np.float32)
+
+        # 新模型: 13 轴 + 5 衍生 = 18 通道
+        grx, gry, grz = raw[:, 10], raw[:, 11], raw[:, 12]
+        gyro_jerk = np.diff(gyro_mag, prepend=gyro_mag[0])
+        grav_norm = np.sqrt(grx**2 + gry**2 + grz**2) + 1e-8
+        vertical_accel = (ax * grx + ay * gry + az * grz) / grav_norm
+
+        feats = np.column_stack([
+            raw,  # 13 raw
+            accel_mag, gyro_mag, accel_jerk,
+            vertical_accel, gyro_jerk,
+        ])
+        return feats.T.astype(np.float32)
 
     # ---- 主循环 ----
     def run(self, verbose: bool = False):
@@ -403,21 +484,19 @@ class RealtimeDetector:
             in_cooldown = (now - self.last_trigger_time) < self.cooldown_s
 
             # ---- 双阈值滞回状态机 ----
-            if not self.armed:
-                # IDLE: P(hit) > prob_high + 不在冷却 → 触发
-                if prob > self.prob_high and not in_cooldown:
-                    self.armed = True
-                    self.total_triggers += 1
-                    print(f"\n  DETECT! (#{self.total_triggers}) | "
-                          f"P(hit)={prob:.3f} > {self.prob_high}")
-
-                    play_sound(self.sound_wav)
-
+            if prob > self.prob_high:
+                if not in_cooldown:
+                    # 每次超过高阈值都重新播放声音 (打断旧声音)
+                    play_sound()
                     self.last_trigger_time = now
-            else:
-                # ARMED: P(hit) 降到低阈值以下 → 释放, 准备下一次检测
-                if prob < self.prob_low:
-                    self.armed = False
+
+                    if not self.armed:
+                        self.armed = True
+                        self.total_triggers += 1
+                        print(f"\n  DETECT! (#{self.total_triggers}) | "
+                              f"P(hit)={prob:.3f} > {self.prob_high}")
+            elif prob < self.prob_low:
+                self.armed = False
 
             # ---- 输出 ----
             if verbose:
@@ -520,7 +599,10 @@ class SimpleDetector:
         self.plot_history: deque = deque(maxlen=300)  # [(mag, ratio, armed), ...]
         self.trigger_frames: deque = deque(maxlen=50)  # 触发时刻的帧号
 
-    def add_imu_frame(self, gx, gy, gz, ax, ay, az):
+    def add_imu_frame(self, gx, gy, gz, ax, ay, az,
+                      qx=0.0, qy=0.0, qz=0.0, qw=0.0,
+                      grx=0.0, gry=0.0, grz=0.0):
+        # SimpleDetector 只用 accel 和 gyro, 忽略 quat/grav
         with self.lock:
             self.buffer.append([gx, gy, gz, ax, ay, az])
             self.frame_count += 1
@@ -596,20 +678,21 @@ class SimpleDetector:
             # 快速通道: jerk 巨大 + ratio 至少>1.5 (说明是冲击而非慢速移动)
             trig_fast = jerk > self.jerk_thresh and ratio > 1.5
 
-            if not self.armed:
-                if (trig_main or trig_fast) and not in_cooldown:
+            if (trig_main or trig_fast) and not in_cooldown:
+                # 每次触发都重新播放声音 (打断旧声音)
+                play_sound()
+                self.last_trigger_time = now
+                self.quiet_count = 0
+                self.trigger_frames.append(self.total_frames + 1)
+
+                if not self.armed:
+                    # 首次触发: 打印 DETECT + 计数
                     self.armed = True
-                    self.quiet_count = 0
                     self.total_triggers += 1
                     channel = "FAST" if (trig_fast and not trig_main) else "STA/LTA"
                     print(f"\n  DETECT! (#{self.total_triggers}) [{channel}] | "
                           f"ratio={ratio:.1f} mag={mag:.2f}g jerk={jerk:+.2f} | "
                           f"s={short:.2f}g l={long:.2f}g")
-
-                    play_sound(self.sound_wav)
-
-                    self.last_trigger_time = now
-                    self.trigger_frames.append(self.total_frames)
             else:
                 if ratio < self.reset_thresh:
                     self.quiet_count += 1
@@ -688,8 +771,10 @@ def osc_listener(detector: RealtimeDetector, port: int, debug: bool = False):
             break
 
         pkt_count += 1
-        gx, gy, gz, ax, ay, az = parse_osc_bundle(raw)
-        detector.add_imu_frame(gx, gy, gz, ax, ay, az)
+        (gx, gy, gz, ax, ay, az,
+         qx, qy, qz, qw, grx, gry, grz) = parse_osc_bundle(raw)
+        detector.add_imu_frame(gx, gy, gz, ax, ay, az,
+                               qx, qy, qz, qw, grx, gry, grz)
 
         if debug:
             now = time.time()
@@ -697,7 +782,9 @@ def osc_listener(detector: RealtimeDetector, port: int, debug: bool = False):
                 print(f"  [DEBUG] 收到 OSC 包 #{pkt_count} 来自 {addr}, "
                       f"大小={len(raw)}B, "
                       f"gyro=({gx:+.3f},{gy:+.3f},{gz:+.3f}), "
-                      f"accel=({ax:+.3f},{ay:+.3f},{az:+.3f})")
+                      f"accel=({ax:+.3f},{ay:+.3f},{az:+.3f}), "
+                      f"quat=({qx:+.3f},{qy:+.3f},{qz:+.3f},{qw:+.3f}), "
+                      f"grav=({grx:+.3f},{gry:+.3f},{grz:+.3f})")
                 last_debug = now
         elif pkt_count == 1:
             print(f"[OSC] 收到第 1 帧! 来自 {addr}, "
@@ -775,6 +862,9 @@ def main():
     if args.simple:
         print("  模式: STA/LTA (无需模型)")
     print("=" * 55)
+
+    # 预加载音频到内存, 消除播放延迟
+    _preload_sound(args.sound_wav)
 
     # 简单模式: 跳过模型加载
     if args.simple:

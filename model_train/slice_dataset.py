@@ -45,12 +45,12 @@ import numpy as np
 # 一、切片参数
 # ============================================================================
 
-WINDOW_SEC = 0.25           # 窗口长度: 250ms (15帧, 足够看到完整波动)
+WINDOW_SEC = 0.117          # 窗口长度: 117ms (7帧, 适配160ms高速踩踏间隔)
 STRIDE_SEC = 0.033          # 滑动步长: ~33ms (训练用, 降低样本冗余)
 TARGET_FS = 60              # 手机 IMU 采样率 (ZigSim 60Hz)
-PRE_MS = 100                 # 击打前扩展: 100ms (允许微弱预判)
-POST_MS = 100               # 击打后扩展: 100ms (覆盖P90, 标注绝大部分可见波动)
-WINDOW_FRAMES = int(WINDOW_SEC * TARGET_FS)    # 15帧
+PRE_MS = 80                  # 击打前扩展: 80ms (预判零延迟)
+POST_MS = 30                 # 击打后扩展: 30ms (落腿冲击训练信号)
+WINDOW_FRAMES = int(WINDOW_SEC * TARGET_FS)    # 7帧
 STRIDE_FRAMES = int(STRIDE_SEC * TARGET_FS)    # 1帧
 
 
@@ -76,11 +76,54 @@ def load_session(session_dir: str) -> dict | None:
     if not imu_files or not click_files:
         return None
 
-    imu = np.load(os.path.join(session_dir, imu_files[0]))        # (T, 7)
+    imu = np.load(os.path.join(session_dir, imu_files[0]))        # (T, 7) 旧 or (T, 14) 新
     clicks = np.load(os.path.join(session_dir, click_files[0]))   # (N,) Unix秒
 
-    imu_data = imu[:, :6].astype(np.float32)
-    imu_time = imu[:, 6] / 1_000_000
+    n_raw_cols = imu.shape[1]  # 7=旧格式, 14=新格式
+    # 时间戳永远是最后一列
+    imu_time = imu[:, -1] / 1_000_000
+
+    if n_raw_cols >= 14:
+        # ── 新格式: gyro(3) + accel(3) + quat(4) + grav(3) + ts(1) ──
+        imu_data = imu[:, :13].astype(np.float32)  # (T, 13)
+        ax, ay, az = imu_data[:, 3], imu_data[:, 4], imu_data[:, 5]
+        gx, gy, gz = imu_data[:, 0], imu_data[:, 1], imu_data[:, 2]
+        grav_x, grav_y, grav_z = imu_data[:, 10], imu_data[:, 11], imu_data[:, 12]
+
+        # 基础衍生特征
+        accel_mag = np.sqrt(ax**2 + ay**2 + az**2)
+        gyro_mag  = np.sqrt(gx**2 + gy**2 + gz**2)
+        accel_jerk = np.diff(accel_mag, prepend=accel_mag[0])
+        gyro_jerk  = np.diff(gyro_mag, prepend=gyro_mag[0])
+
+        # 垂直加速度: 将加速度投影到重力方向
+        grav_norm = np.sqrt(grav_x**2 + grav_y**2 + grav_z**2) + 1e-8
+        vertical_accel = (ax * grav_x + ay * grav_y + az * grav_z) / grav_norm
+
+        imu_data = np.column_stack([
+            imu_data,
+            accel_mag.astype(np.float32),
+            gyro_mag.astype(np.float32),
+            accel_jerk.astype(np.float32),
+            vertical_accel.astype(np.float32),
+            gyro_jerk.astype(np.float32),
+        ])  # (T, 18)
+    else:
+        # ── 旧格式: gyro(3) + accel(3) + ts(1) ──
+        imu_data = imu[:, :6].astype(np.float32)  # (T, 6)
+        ax, ay, az = imu_data[:, 3], imu_data[:, 4], imu_data[:, 5]
+
+        # 基础衍生特征 (无重力数据, 无法计算 vertical_accel)
+        accel_mag = np.sqrt(ax**2 + ay**2 + az**2)
+        gyro_mag  = np.sqrt(imu_data[:, 0]**2 + imu_data[:, 1]**2 + imu_data[:, 2]**2)
+        accel_jerk = np.diff(accel_mag, prepend=accel_mag[0])
+
+        imu_data = np.column_stack([
+            imu_data,
+            accel_mag.astype(np.float32),
+            gyro_mag.astype(np.float32),
+            accel_jerk.astype(np.float32),
+        ])  # (T, 9)
 
     # ── 对齐两个时间轴: 优先 _t0_ 文件, 否则估算 ──
     t0_files = [f for f in files if "_t0_" in f and f.endswith(".npy")]
@@ -139,7 +182,7 @@ def slice_windows(imu: np.ndarray, y_frame: np.ndarray) -> tuple[np.ndarray, np.
         y_list.append(y_frame[end - 1])
 
     if not X_list:
-        return np.empty((0, 6, W)), np.empty((0,))
+        return np.empty((0, 0, W)), np.empty((0,))
     return np.stack(X_list), np.array(y_list)
 
 
@@ -158,7 +201,7 @@ def save_preproc_stats(X_all: np.ndarray, save_dir: str):
         target_fs=TARGET_FS, window_frames=WINDOW_FRAMES,
         stride_frames=STRIDE_FRAMES,
         pre_ms=PRE_MS, post_ms=POST_MS,
-        channels=6, classes=2,
+        channels=X_all.shape[1], classes=2,
     )
     return mean, std
 
@@ -249,10 +292,10 @@ def main():
                         help="包含原始 session 子目录的文件夹 (如 train_data/)")
     parser.add_argument("--save", default="sliced_data",
                         help="输出目录 (默认: sliced_data/)")
-    parser.add_argument("--pre", type=int, default=70,
-                        help="击打前扩展 ms (默认: 70ms)")
-    parser.add_argument("--post", type=int, default=150,
-                        help="击打后扩展 ms (默认: 150ms)")
+    parser.add_argument("--pre", type=int, default=80,
+                        help="击打前扩展 ms (默认: 80ms)")
+    parser.add_argument("--post", type=int, default=30,
+                        help="击打后扩展 ms (默认: 30ms)")
     parser.add_argument("--clean", action="store_true",
                         help="切片前清空输出目录 (默认: 增量添加/覆盖)")
 

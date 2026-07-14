@@ -35,7 +35,8 @@ import numpy as np
 
 def load_session_slices(data_dir: str,
                         val_sessions: list[str] | None = None,
-                        neg_sessions: list[str] | None = None) -> dict:
+                        neg_sessions: list[str] | None = None,
+                        balance_mode: str = "posthit") -> dict:
     """
     加载 slice_dataset.py 按 session 独立切片的数据, 按需汇总 train/val。
 
@@ -115,7 +116,7 @@ def load_session_slices(data_dir: str,
                     "mean": None, "std": None, "preproc": None, "format": "sessions"}
 
         # ── 平衡训练集 ──
-        X_train, y_train = _balance_dataset(train_X, train_y, train_names, neg_set)
+        X_train, y_train = _balance_dataset(train_X, train_y, train_names, neg_set, balance_mode)
 
         # ── 汇总验证集 ──
         X_val_out, y_val_out = None, None
@@ -192,15 +193,73 @@ def load_session_slices(data_dir: str,
     raise SystemExit(1)
 
 
-def _balance_dataset(train_X: list, train_y: list, train_names: list,
-                     neg_set: set) -> tuple[np.ndarray, np.ndarray]:
-    """
-    平衡训练集: 下采样背景至击打的 2 倍, 按 session 均匀分配配额。
-    neg_set 中的 session 获得 2x 配额。
-    """
+def _balance_random(train_X, train_y, train_names, neg_set):
+    """legacy模式: bg≤hit×2, 均匀随机抽取, neg×3."""
     total_hit = sum(int((y == 1).sum()) for y in train_y)
     total_bg = sum(int((y == 0).sum()) for y in train_y)
     total_bg_keep = min(total_bg, total_hit * 2)
+    n_sessions = len(train_y)
+    rng = np.random.RandomState(42)
+    session_bg_counts = np.array([int((y == 0).sum()) for y in train_y], dtype=int)
+    session_hit_counts = np.array([int((y == 1).sum()) for y in train_y], dtype=int)
+    base_quota = total_bg_keep // n_sessions
+    quota = np.full(n_sessions, base_quota, dtype=int)
+    quota[:total_bg_keep % n_sessions] += 1
+    if neg_set:
+        for i, name in enumerate(train_names):
+            if name in neg_set:
+                quota[i] = min(session_bg_counts[i], quota[i] * 3)
+    balanced_X, balanced_y, kept = [], [], []
+    for i in range(n_sessions):
+        X_sess, y_sess = train_X[i], train_y[i]
+        hit_idx = np.where(y_sess == 1)[0]
+        bg_idx = np.where(y_sess == 0)[0]
+        n_bg_keep = min(quota[i], len(bg_idx))
+        keep_bg = rng.choice(bg_idx, n_bg_keep, replace=False) if n_bg_keep > 0 and len(bg_idx) > n_bg_keep else bg_idx
+        keep = np.concatenate([hit_idx, keep_bg]); keep.sort()
+        balanced_X.append(X_sess[keep]); balanced_y.append(y_sess[keep])
+        kept.append(len(keep_bg))
+    deficit = total_bg_keep - sum(kept)
+    if deficit > 0:
+        surplus = [i for i in range(n_sessions) if kept[i] < session_bg_counts[i]]
+        if surplus:
+            total_surplus = sum(session_bg_counts[i] - kept[i] for i in surplus)
+            for i in surplus:
+                avail = session_bg_counts[i] - kept[i]
+                n_extra = min(avail, int(deficit * avail / total_surplus) + 1)
+                n_extra = min(n_extra, deficit)
+                if n_extra > 0:
+                    bg_idx = np.where(train_y[i] == 0)[0]
+                    extra_bg = rng.choice(bg_idx, min(n_extra, len(bg_idx)), replace=False)
+                    balanced_X[i] = np.concatenate([balanced_X[i], train_X[i][extra_bg]])
+                    balanced_y[i] = np.concatenate([balanced_y[i], np.zeros(len(extra_bg), dtype=train_y[i].dtype)])
+                    kept[i] += len(extra_bg); deficit -= len(extra_bg)
+    X_train = np.concatenate(balanced_X); y_train = np.concatenate(balanced_y)
+    print(f"\n  训练集 (平衡-random): hit={total_hit}, bg 目标={total_bg_keep}, 实际={int((y_train==0).sum())}")
+    for i in range(n_sessions):
+        is_neg = neg_set and train_names[i] in neg_set
+        print(f"    [{i}] {train_names[i]:12s} {session_bg_counts[i]:5d} bg -> 抽 {kept[i]:5d}"
+              f"  (hit={session_hit_counts[i]:4d}){' [NEG x3]' if is_neg else ''}")
+    print(f"  X_train: {X_train.shape}  y_train: {y_train.shape}")
+    return X_train, y_train
+
+
+def _balance_dataset(train_X: list, train_y: list, train_names: list,
+                     neg_set: set, balance_mode: str = "posthit") -> tuple[np.ndarray, np.ndarray]:
+    """
+    平衡训练集:
+      balance_mode="posthit": 优先保留击打后120ms负例, bg≤hit×2.5
+      balance_mode="random":  均匀随机抽取, bg≤hit×2.0
+      neg_set 中的 session 获得 3x 配额.
+    """
+    if balance_mode == "random":
+        return _balance_random(train_X, train_y, train_names, neg_set)
+
+    POST_HIT_FRAMES = 7  # 120ms @ 60Hz / 1帧stride ≈ 7帧
+
+    total_hit = sum(int((y == 1).sum()) for y in train_y)
+    total_bg = sum(int((y == 0).sum()) for y in train_y)
+    total_bg_keep = min(total_bg, int(total_hit * 2.5))
 
     n_sessions = len(train_y)
     rng = np.random.RandomState(42)
@@ -208,10 +267,42 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
     session_bg_counts = np.array([int((y == 0).sum()) for y in train_y], dtype=int)
     session_hit_counts = np.array([int((y == 1).sum()) for y in train_y], dtype=int)
 
-    base_quota = total_bg_keep // n_sessions
-    quota = np.full(n_sessions, base_quota, dtype=int)
-    quota[:total_bg_keep % n_sessions] += 1
+    # Phase 1: 标记每个 session 中"击打后120ms"的负例
+    post_hit_masks = []  # 每个session的bool数组
+    post_hit_counts = []
+    for i in range(n_sessions):
+        y_sess = train_y[i]
+        mask = np.zeros(len(y_sess), dtype=bool)
+        # 找到每个 hit run 的结束位置
+        changes = np.diff(np.concatenate([[0], y_sess, [0]]))
+        ends = np.where(changes == -1)[0]  # 1→0 的位置, 即 hit run 结束后的第一帧
+        for end in ends:
+            if end < len(y_sess):
+                # 标记之后 POST_HIT_FRAMES 帧 (跳过高位=已经是正例)
+                for j in range(end, min(end + POST_HIT_FRAMES, len(y_sess))):
+                    if y_sess[j] == 0:
+                        mask[j] = True
+        post_hit_masks.append(mask)
+        post_hit_counts.append(int(mask.sum()))
 
+    total_post_hit = sum(post_hit_counts)
+    print(f"\n  [平衡] 击打后120ms负例: {total_post_hit} (占全部bg的 {total_post_hit/total_bg*100:.1f}%)")
+
+    # Phase 2: 分配配额 — 先保留所有post-hit负例, 剩余按session均匀分
+    # 如果post-hit已经超过总配额, 按比例下采样post-hit
+    if total_post_hit > total_bg_keep:
+        post_hit_keep_ratio = total_bg_keep / total_post_hit
+        print(f"  [平衡] post-hit({total_post_hit}) > 配额({total_bg_keep}), "
+              f"按{post_hit_keep_ratio:.1%}下采样")
+    else:
+        post_hit_keep_ratio = 1.0
+
+    remaining_quota = max(0, total_bg_keep - int(total_post_hit * post_hit_keep_ratio))
+    base_quota = remaining_quota // n_sessions
+    quota = np.full(n_sessions, base_quota, dtype=int)
+    quota[:remaining_quota % n_sessions] += 1
+
+    # neg_set 中的 session: 3x
     if neg_set:
         for i, name in enumerate(train_names):
             if name in neg_set:
@@ -219,24 +310,39 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
 
     balanced_X, balanced_y = [], []
     kept_per_session = []
+    kept_post_hit = []
+
     for i in range(n_sessions):
         X_sess, y_sess = train_X[i], train_y[i]
         hit_idx = np.where(y_sess == 1)[0]
         bg_idx = np.where(y_sess == 0)[0]
 
-        n_bg_keep = min(quota[i], len(bg_idx))
-        if n_bg_keep > 0 and len(bg_idx) > n_bg_keep:
-            keep_bg = rng.choice(bg_idx, n_bg_keep, replace=False)
+        # 先取所有 post-hit 负例 (可能按下采样比例)
+        post_hit_idx = np.where(post_hit_masks[i])[0]
+        n_post_keep = max(1, int(len(post_hit_idx) * post_hit_keep_ratio)) if len(post_hit_idx) > 0 else 0
+        if n_post_keep > 0 and len(post_hit_idx) > n_post_keep:
+            keep_post = rng.choice(post_hit_idx, n_post_keep, replace=False)
         else:
-            keep_bg = bg_idx
+            keep_post = post_hit_idx
 
+        # 再从剩余负例中抽取 quota
+        remaining_bg = np.setdiff1d(bg_idx, keep_post)
+        n_quota_keep = min(quota[i], len(remaining_bg))
+        if n_quota_keep > 0 and len(remaining_bg) > n_quota_keep:
+            keep_quota = rng.choice(remaining_bg, n_quota_keep, replace=False)
+        else:
+            keep_quota = remaining_bg
+
+        keep_bg = np.concatenate([keep_post, keep_quota])
         keep = np.concatenate([hit_idx, keep_bg]); keep.sort()
         balanced_X.append(X_sess[keep])
         balanced_y.append(y_sess[keep])
         kept_per_session.append(len(keep_bg))
+        kept_post_hit.append(len(keep_post))
 
     # deficit redistribution
-    deficit = total_bg_keep - sum(kept_per_session)
+    actual_kept = sum(kept_per_session)
+    deficit = total_bg_keep - actual_kept
     if deficit > 0:
         surplus = [i for i in range(n_sessions) if kept_per_session[i] < session_bg_counts[i]]
         if surplus:
@@ -257,12 +363,14 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
     X_train = np.concatenate(balanced_X)
     y_train = np.concatenate(balanced_y)
 
-    print(f"\n  训练集 (平衡): hit={total_hit}, bg 目标={total_bg_keep}, 实际={int((y_train==0).sum())}")
+    print(f"\n  训练集 (平衡): hit={total_hit}, bg 目标={total_bg_keep}, "
+          f"实际={int((y_train==0).sum())}, 其中post-hit={sum(kept_post_hit)}")
     for i in range(n_sessions):
         is_neg = neg_set and train_names[i] in neg_set
-        tag = " [NEG x2]" if is_neg else ""
+        tag = " [NEG x3]" if is_neg else ""
+        ph = kept_post_hit[i]
         print(f"    [{i}] {train_names[i]:12s} {session_bg_counts[i]:5d} bg -> 抽 {kept_per_session[i]:5d}"
-              f"  (hit={session_hit_counts[i]:4d}){tag}")
+              f"  (hit={session_hit_counts[i]:4d}, post-hit={ph}){tag}")
 
     print(f"  X_train: {X_train.shape}  y_train: {y_train.shape}")
     return X_train, y_train
@@ -272,9 +380,11 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
 # 二、模型定义
 # ============================================================================
 
-def build_inception_time(dls, nf: int = 32, depth: int = 4):
+def build_inception_time(dls, nf: int = 32, depth: int = 4,
+                         seq_len: int | None = None,
+                         dropout: float = 0.4):
     """
-    InceptionTime 定制版 — 针对 15帧短窗口优化
+    InceptionTime 定制版 — 针对短窗口优化
     =========================================================================
     相比 tsai 默认版的两大改动:
 
@@ -282,16 +392,15 @@ def build_inception_time(dls, nf: int = 32, depth: int = 4):
        - k=3 →  ~50ms 局部模式 (踩踏上升沿, ~3帧)
        - k=5 →  ~83ms 中等模式
        - k=7 → ~117ms 较长模式 (衰减过程)
-       - 15帧窗口下所有核都 100% 用真实数据, 不做 padding 无效运算
 
     2. 指数加权池化 替代 GAP (全局平均池化)
-       - 靠近窗口末尾的帧权重更大 (最后帧权重 ≈ 第一帧的 4.5x)
+       - 靠近窗口末尾的帧权重更大
        - 模型学会"窗口末帧 = 此刻 = 预测目标"
-       - 训练/推理方向一致
 
     参数:
       nf=32:   每支路滤波器数 (4路 = 128输出通道)
-      depth=4: Inception 模块堆叠层数 (15帧用4层足够)
+      depth=4: Inception 模块堆叠层数
+      seq_len: 窗口帧数 (None=自动从dls推断)
     """
     import torch
     import torch.nn as nn
@@ -351,11 +460,11 @@ def build_inception_time(dls, nf: int = 32, depth: int = 4):
             super().__init__()
             self.backbone = InceptionBlock(c_in, nf, depth, ks)
             # 可学习的时序权重 (初始化为指数递增)
-            max_t = 15  # window_frames
-            init_w = torch.exp(torch.linspace(0, 2.0, max_t))  # 1.0 → 7.4
+            n_t = seq_len if seq_len else 15  # 动态适配窗口帧数
+            init_w = torch.exp(torch.linspace(0, 2.0, n_t))
             self.time_weights = nn.Parameter(init_w)
             self.head = nn.Sequential(
-                nn.Dropout(0.2),
+                nn.Dropout(dropout),
                 nn.Linear(out_ch, c_out),
             )
 
@@ -462,23 +571,76 @@ def build_tst(dls):
 # 三、训练流程
 # ============================================================================
 
+# ============================================================================
+# 三、训练流程
+# ============================================================================
+
+def _imu_rotate_augment(X: np.ndarray, max_angle_deg: float = 15) -> np.ndarray:
+    """
+    对每个窗口施加随机小角度 3D 旋转, 模拟不同手机朝向.
+    旋转 gyro(0-2), accel(3-5), gravity(10-12), 然后重新计算衍生特征(13-17).
+
+    参考: Um et al. (2017) "Data augmentation of wearable sensor data"
+          Müller et al. (2024) IMU-based fitness activity recognition
+    """
+    rng = np.random.RandomState()
+    N, C, T = X.shape
+    X_aug = X.copy()
+
+    for i in range(N):
+        angle = np.deg2rad(rng.uniform(0, max_angle_deg))
+        axis = rng.randn(3)
+        axis /= np.linalg.norm(axis) + 1e-8
+
+        # Rodrigues 旋转公式
+        x, y, z = axis
+        K = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
+        R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+        # 逐帧旋转 gyro, accel, gravity
+        for t in range(T):
+            X_aug[i, :3, t] = R @ X[i, :3, t]
+            X_aug[i, 3:6, t] = R @ X[i, 3:6, t]
+            X_aug[i, 10:13, t] = R @ X[i, 10:13, t]
+
+        # 重新计算衍生特征
+        ax, ay, az = X_aug[i, 3], X_aug[i, 4], X_aug[i, 5]
+        gx, gy, gz = X_aug[i, 0], X_aug[i, 1], X_aug[i, 2]
+        grx, gry, grz = X_aug[i, 10], X_aug[i, 11], X_aug[i, 12]
+
+        X_aug[i, 13] = np.sqrt(ax**2 + ay**2 + az**2)
+        X_aug[i, 14] = np.sqrt(gx**2 + gy**2 + gz**2)
+        X_aug[i, 15] = np.diff(X_aug[i, 13], prepend=X_aug[i, 13, 0])
+        grav_norm = np.sqrt(grx**2 + gry**2 + grz**2) + 1e-8
+        X_aug[i, 16] = (ax * grx + ay * gry + az * grz) / grav_norm
+        X_aug[i, 17] = np.diff(X_aug[i, 14], prepend=X_aug[i, 14, 0])
+
+    return X_aug
+
+
 def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
-          epochs: int = 70, batch_size: int = 64, lr: float = 1e-3,
+          epochs: int = 70, batch_size: int = 64, lr: float = 5e-4,
           save_dir: str = "models", focal_gamma: float = 0,
           X_val: np.ndarray | None = None, y_val: np.ndarray | None = None,
           preproc_mean: np.ndarray | None = None,
-          preproc_std: np.ndarray | None = None):
+          preproc_std: np.ndarray | None = None,
+          aug_rotate_deg: float = 0,
+          dropout: float = 0.4,
+          weight_decay: float = 1e-3):
     """
     完整训练流程:
-      1. 标准化 (每通道 Z-score)
-      2. 训练/验证分割:
+      1. 数据增强 — IMU 旋转 (模拟不同手机朝向)
+      2. 标准化 (每通道 Z-score)
+      3. 训练/验证分割:
          - 提供了 X_val/y_val → 直接使用 (session 级独立验证集)
          - 未提供 → 窗口级随机分割 (旧行为, 可能泄露)
-      3. InceptionTime / FCN / LiteCNN / TST
-      4. CrossEntropyLoss / AdditiveMarginLoss + AdamW (One-Cycle 学习率)
-      5. EarlyStopping: valid_loss 连续 10 轮不降 → 停止
-      6. 保存验证集 loss 最低的模型 + 预处理参数
-      7. 评估: 分类报告 + 混淆矩阵 + 训练曲线
+      4. InceptionTime / FCN / LiteCNN / TST
+      5. CrossEntropyLoss / AdditiveMarginLoss + AdamW (One-Cycle 学习率)
+      6. EarlyStopping: valid_loss 连续 10 轮不降 → 停止
+      7. 保存验证集 loss 最低的模型 + 预处理参数
+      8. 评估: 分类报告 + 混淆矩阵 + 训练曲线
+
+    aug_rotate_deg: IMU 旋转增强最大角度 (度). 0=不增强. 建议 10-15.
     """
     import torch
     import torch.nn as nn
@@ -499,10 +661,23 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
 
     y = y.astype(np.int64)
 
-    # ── 3.1 标准化 ──
+    # ── 3.1 数据增强: IMU 旋转 (3个随机副本) ──
+    if aug_rotate_deg > 0:
+        N_COPIES = 3
+        print(f"\n  [增强] IMU 旋转: max={aug_rotate_deg}°, {N_COPIES}个随机副本")
+        X_parts, y_parts = [X], [y]
+        for copy_i in range(N_COPIES):
+            X_aug = _imu_rotate_augment(X, aug_rotate_deg)
+            X_parts.append(X_aug)
+            y_parts.append(y)
+        X = np.concatenate(X_parts, axis=0)
+        y = np.concatenate(y_parts, axis=0)
+        print(f"  [增强] 训练集: {len(X)} 样本 (原始 + {N_COPIES}x增强 = {N_COPIES+1}x)")
+        # 注意: 验证集不做增强
+
+    # ── 3.2 标准化 ──
     # 优先使用 slice_dataset.py 预计算的统计量, 否则从训练集计算
     if preproc_mean is not None and preproc_std is not None:
-        # preproc_mean/std 来自 preproc.npz, shape (6,) → reshape 为 (1, 6, 1)
         mean = preproc_mean.reshape(1, -1, 1)
         std = preproc_std.reshape(1, -1, 1)
         print(f"  [标准化] 使用预计算 mean/std (来自 preproc.npz)")
@@ -545,11 +720,15 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
     }
     if model_name not in models:
         raise ValueError(f"未知模型: {model_name}. 可选: {list(models.keys())}")
-    model = models[model_name](dls)
+    seq_len = X.shape[2] if len(X.shape) == 3 else None
+    model = (models[model_name](dls, seq_len=seq_len, dropout=dropout)
+             if model_name == "inception"
+             else models[model_name](dls))
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"\n  模型: {model_name}, 参数量: {param_count:,}")
-    print(f"  窗口: 250ms (15帧 @60Hz)")
+    win_frames = X.shape[2]
+    print(f"  窗口: {win_frames / 60 * 1000:.0f}ms ({win_frames}帧 @60Hz)")
     print(f"  训练集: {len(splits[0])}, 验证集: {len(splits[1])}")
 
     # ── 3.5 Learner (训练器) ──
@@ -562,10 +741,12 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
         loss_func = nn.CrossEntropyLoss()
         print(f"\n  [Loss] CrossEntropyLoss")
 
+    print(f"\n  [正则化] dropout={dropout}, weight_decay={weight_decay}")
     learn = Learner(
         dls, model,
         loss_func=loss_func,
         metrics=[accuracy],
+        wd=weight_decay,
         cbs=[
             SaveModelCallback(monitor="valid_loss"),
             EarlyStoppingCallback(monitor="valid_loss", patience=10),
@@ -611,10 +792,10 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
         "model_name": model_name,             # 架构名 (推理时重建用)
         "mean": mean,                          # 标准化均值 (1,6,1)
         "std": std,                            # 标准化标准差 (1,6,1)
-        "window_sec": 0.25,                    # 窗口长度 (250ms)
-        "window_frames": 15,                   # 窗口帧数
+        "window_sec": X.shape[2] / 60.0,        # 窗口长度 (从帧数推导, N/60Hz)
+        "window_frames": X.shape[2],            # 窗口帧数 (从数据推导)
         "target_fs": 60,                       # 采样率
-        "channels": 6,                         # 输入通道数
+        "channels": X.shape[1],                  # 输入通道数 (从数据推导)
         "classes": 2,                          # 输出类别数
     }, model_path)
     print(f"\n  模型已保存: {model_path}")
@@ -622,33 +803,17 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
     # ── 3.9 绘制训练曲线 ──
     try:
         import matplotlib
-        matplotlib.use("Agg")  # 非交互后端, 避免 tk/qt 字体问题
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from matplotlib import font_manager
-
-        # ── 字体配置: 优先使用 Windows 清晰字体 ──
-        # 查找可用的优质 sans-serif 字体
-        _preferred = ["Microsoft YaHei", "SimHei", "Arial", "DejaVu Sans"]
-        _available = {f.name for f in font_manager.fontManager.ttflist}
-        _selected = next((f for f in _preferred if f in _available), "sans-serif")
-
-        matplotlib.rcParams.update({
-            "font.family": "sans-serif",
-            "font.sans-serif": [_selected, "DejaVu Sans", "Arial", "sans-serif"],
-            "font.size": 11,
-            "axes.titlesize": 13,
-            "axes.labelsize": 11,
-            "axes.unicode_minus": False,   # 防止负号显示为方块
-            "figure.dpi": 120,
-            "savefig.dpi": 150,
-            "savefig.bbox": "tight",
-        })
 
         rec = learn.recorder
-
-        # 用 fastai 内置方法拿到 loss 历史
         train_loss = [v[0] for v in rec.values]
         valid_loss_vals = [v[1] for v in rec.values]
+        acc_vals = [v[2] for v in rec.values] if len(rec.values[0]) >= 3 else None
+
+        print(f"  [曲线] epochs={len(train_loss)}, has_accuracy={acc_vals is not None}")
+        print(f"  [曲线] train_loss=[{train_loss[0]:.4f}..{train_loss[-1]:.4f}]")
+        print(f"  [曲线] valid_loss=[{valid_loss_vals[0]:.4f}..{valid_loss_vals[-1]:.4f}]")
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         epochs_arr = range(1, len(train_loss) + 1)
@@ -657,25 +822,29 @@ def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
         ax1.plot(epochs_arr, valid_loss_vals, "r-", lw=1.5, label="Valid Loss")
         ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
         ax1.set_title("Loss Curve"); ax1.legend(); ax1.grid(True, alpha=0.3)
+        # 固定 y 轴起点为0, 防止空白
+        all_loss = train_loss + valid_loss_vals
+        ax1.set_ylim(0, max(all_loss) * 1.1)
 
-        # accuracy — rec.values[i] 可能只有2个元素 (无metrics)
-        if len(rec.values[0]) >= 3:
-            acc = [v[2] for v in rec.values]
-            ax2.plot(epochs_arr, acc, "g-", lw=1.5, label="Accuracy")
+        if acc_vals is not None:
+            ax2.plot(epochs_arr, acc_vals, "g-", lw=1.5, label="Accuracy")
+            ax2.set_ylim(0, 1.05)
         else:
-            ax2.text(0.5, 0.5, "accuracy unavailable\n(loss curve is normal)",
+            ax2.text(0.5, 0.5, "accuracy unavailable",
                      ha="center", va="center", transform=ax2.transAxes, fontsize=14)
         ax2.set_xlabel("Epoch"); ax2.set_ylabel("Accuracy")
         ax2.set_title("Validation Accuracy"); ax2.legend(); ax2.grid(True, alpha=0.3)
 
-        fig.suptitle(f"Training Curve — {model_name}", fontsize=14, weight="bold")
+        fig.suptitle(f"Training Curve - {model_name}", fontsize=14, weight="bold")
         plt.tight_layout()
         path = os.path.join(save_dir, f"curve_{model_name}.png")
-        plt.savefig(path)
-        print(f"  训练曲线: {path}")
+        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close("all")
+        print(f"  训练曲线: {path}")
     except Exception as e:
+        import traceback
         print(f"  [WARN] 绘制曲线失败: {e}")
+        traceback.print_exc()
 
     return learn, model
 
@@ -698,8 +867,8 @@ def main():
                         help="最大训练轮数 (早停机制会在 loss 不降时提前停止)")
     parser.add_argument("--bs", type=int, default=64,
                         help="批次大小 (显存不够可减小)")
-    parser.add_argument("--lr", type=float, default=1e-3,
-                        help="初始学习率 (One-Cycle 策略会自动调整)")
+    parser.add_argument("--lr", type=float, default=5e-4,
+                        help="初始学习率 (One-Cycle 策略会自动调整, 默认 5e-4)")
     parser.add_argument("--save_dir", default="models",
                         help="模型保存目录")
     parser.add_argument("--focal-loss", type=float, default=0,
@@ -712,8 +881,23 @@ def main():
     parser.add_argument("--neg-sessions", type=str, default="",
                         help="逗号分隔的负样本 session 名, 例如 'shaking_0,shaking_1'. "
                              "背景样本在下采样时优先保留, 确保纯负样本不被随机丢弃.")
+    parser.add_argument("--aug-rotate", type=float, default=0,
+                        help="IMU 旋转增强最大角度 (度). 0=不增强. "
+                             "建议 10-15. 模拟小幅手机朝向变化, 提升泛化能力.")
+    parser.add_argument("--dropout", type=float, default=0.4,
+                        help="Dropout 概率 (默认 0.4, 防过拟合)")
+    parser.add_argument("--weight-decay", type=float, default=1e-3,
+                        help="L2 权重衰减 (默认 1e-3, 防过拟合)")
+    parser.add_argument("--no-augment", action="store_true",
+                        help="禁用数据增强 (快速训练)")
+    parser.add_argument("--balance-mode", type=str, default="posthit",
+                        choices=["posthit", "random"],
+                        help="负例平衡策略: posthit=优先保留击打后120ms负例(默认), "
+                             "random=均匀随机抽取")
 
     args = parser.parse_args()
+
+    aug_rotate = 0 if args.no_augment else args.aug_rotate
 
     val_sessions = [s.strip() for s in args.val_sessions.split(",") if s.strip()] \
                    if args.val_sessions else None
@@ -732,7 +916,8 @@ def main():
     print("=" * 55)
 
     # 加载预处理数据 (按 session 独立切片)
-    data = load_session_slices(args.data_dir, val_sessions, neg_sessions)
+    data = load_session_slices(args.data_dir, val_sessions, neg_sessions,
+                               balance_mode=args.balance_mode)
     X_train, y_train = data["X_train"], data["y_train"]
     X_val, y_val = data["X_val"], data["y_val"]
     preproc_mean, preproc_std = data["mean"], data["std"]
@@ -758,7 +943,9 @@ def main():
     # 训练
     train(X_train, y_train, args.model, args.epochs, args.bs, args.lr, args.save_dir,
           focal_gamma=args.focal_loss, X_val=X_val, y_val=y_val,
-          preproc_mean=preproc_mean, preproc_std=preproc_std)
+          preproc_mean=preproc_mean, preproc_std=preproc_std,
+          aug_rotate_deg=aug_rotate,
+          dropout=args.dropout, weight_decay=args.weight_decay)
 
 
 if __name__ == "__main__":

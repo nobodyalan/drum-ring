@@ -33,7 +33,8 @@ def load_session(session_dir: str) -> dict | None:
     clicks = np.load(os.path.join(session_dir, click_files[0]))
 
     imu_data = imu[:, :6].astype(np.float32)
-    imu_time = imu[:, 6] / 1_000_000
+    # 时间戳永远是最后一列 (旧格式 col 6, 新格式 col 13)
+    imu_time = imu[:, -1] / 1_000_000
 
     # 时间对齐: 优先使用录制时保存的真实 t0
     t0_files = [f for f in files if "_t0_" in f and f.endswith(".npy")]

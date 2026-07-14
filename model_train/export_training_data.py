@@ -43,9 +43,9 @@ DEFAULT_BAUD = 115200
 # ===================== OSC 解析 =====================
 
 def parse_osc_bundle(raw: bytes) -> tuple:
-    """解析 OSC Bundle, 返回 (gyro_x,gyro_y,gyro_z, accel_x,accel_y,accel_z)"""
+    """解析 OSC Bundle, 返回 (gyro, accel, quat, grav) 各分量共 13 个 float"""
     data = memoryview(raw)
-    acc = gyr = None
+    acc = gyr = quat = grav = None
     try:
         offset = 16 if bytes(data[:8]) == b"#bundle\0" else 0
         is_b = (offset == 16)
@@ -58,25 +58,38 @@ def parse_osc_bundle(raw: bytes) -> tuple:
                 offset += el
             else:
                 chunk = data
+            # 解析地址
             ae = chunk.tobytes().find(b"\0")
             if ae <= 0: break
             astr = bytes(chunk[:ae]).decode("ascii", errors="replace")
             ao = (ae + 4) & ~3
+            # 解析类型标签 (如 ",fff" 或 ",ffff")
             te = chunk[ao:].tobytes().find(b"\0")
             if te <= 0: break
+            types = chunk[ao+1:ao+te].tobytes().decode("ascii", errors="replace")
             do = (ao + te + 4) & ~3
-            if do + 12 <= len(chunk):
-                vals = struct.unpack(">fff", chunk[do:do+12])
+            # 读取浮点数 (根据类型标签中的 f 数量)
+            nf = types.count('f')
+            if nf > 0 and do + nf * 4 <= len(chunk):
+                fmt = ">" + "f" * nf
+                vals = struct.unpack(fmt, chunk[do:do + nf * 4])
                 if "/accel" in astr:
                     acc = (float(vals[0]), float(vals[1]), float(vals[2]))
                 elif "/gyro" in astr:
                     gyr = (float(vals[0]), float(vals[1]), float(vals[2]))
+                elif "/quaternion" in astr or "/quat" in astr:
+                    if nf >= 4:
+                        quat = (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
+                elif "/gravity" in astr or "/grav" in astr:
+                    grav = (float(vals[0]), float(vals[1]), float(vals[2]))
             if not is_b: break
     except Exception:
         pass
-    gx, gy, gz = gyr or (0, 0, 0)
-    ax, ay, az = acc or (0, 0, 0)
-    return gx, gy, gz, ax, ay, az
+    gx, gy, gz = gyr or (0.0, 0.0, 0.0)
+    ax, ay, az = acc or (0.0, 0.0, 0.0)
+    qx, qy, qz, qw = quat or (0.0, 0.0, 0.0, 0.0)
+    grx, gry, grz = grav or (0.0, 0.0, 0.0)
+    return gx, gy, gz, ax, ay, az, qx, qy, qz, qw, grx, gry, grz
 
 
 # ===================== 数据采集器 =====================
@@ -107,12 +120,16 @@ class TrainingCollector:
         self.start_time: Optional[float] = None  # 录制起始 PC 时间
 
     def add_imu(self, t: float, gx: float, gy: float, gz: float,
-                ax: float, ay: float, az: float):
+                ax: float, ay: float, az: float,
+                qx: float = 0.0, qy: float = 0.0, qz: float = 0.0, qw: float = 0.0,
+                grx: float = 0.0, gry: float = 0.0, grz: float = 0.0):
         if self.start_time is None:
             self.start_time = t
         with self.lock:
-            self.imu_buffer.append((t, gx, gy, gz, ax, ay, az))
-            self.imu_continuous.append((t, gx, gy, gz, ax, ay, az))
+            self.imu_buffer.append((t, gx, gy, gz, ax, ay, az,
+                                    qx, qy, qz, qw, grx, gry, grz))
+            self.imu_continuous.append((t, gx, gy, gz, ax, ay, az,
+                                        qx, qy, qz, qw, grx, gry, grz))
 
     def add_hit(self, event: HitEvent):
         with self.lock:
@@ -131,18 +148,27 @@ class TrainingCollector:
             print("⚠ 没有 IMU 数据!")
             return
 
-        # ── 构建 (T, 7) IMU 数组 ──
+        # ── 构建 (T, 14) IMU 数组 ──
+        # 列: gyro(3) + accel(3) + quat(4) + grav(3) + timestamp_us(1) = 14
         T = len(imu_snapshot)
-        imu_arr = np.zeros((T, 7), dtype=np.float64)
+        imu_arr = np.zeros((T, 14), dtype=np.float64)
         t0 = imu_snapshot[0][0]  # 第一帧的 PC 时间
-        for i, (t, gx, gy, gz, ax, ay, az) in enumerate(imu_snapshot):
-            imu_arr[i, 0] = gx
-            imu_arr[i, 1] = gy
-            imu_arr[i, 2] = gz
-            imu_arr[i, 3] = ax
-            imu_arr[i, 4] = ay
-            imu_arr[i, 5] = az
-            imu_arr[i, 6] = (t - t0) * 1_000_000  # 微秒
+        for i, row in enumerate(imu_snapshot):
+            t = row[0]
+            imu_arr[i, 0] = row[1]   # gx
+            imu_arr[i, 1] = row[2]   # gy
+            imu_arr[i, 2] = row[3]   # gz
+            imu_arr[i, 3] = row[4]   # ax
+            imu_arr[i, 4] = row[5]   # ay
+            imu_arr[i, 5] = row[6]   # az
+            imu_arr[i, 6] = row[7]   # qx
+            imu_arr[i, 7] = row[8]   # qy
+            imu_arr[i, 8] = row[9]   # qz
+            imu_arr[i, 9] = row[10]  # qw
+            imu_arr[i, 10] = row[11] # gravity_x
+            imu_arr[i, 11] = row[12] # gravity_y
+            imu_arr[i, 12] = row[13] # gravity_z
+            imu_arr[i, 13] = (t - t0) * 1_000_000  # 微秒
 
         # ── 构建 Click Timestamps ──
         click_ts = np.array([h.pc_time for h in hits_snapshot], dtype=np.float64)
@@ -158,11 +184,11 @@ class TrainingCollector:
         t0_path = os.path.join(save_dir, f"{prefix}_t0_{freq}.npy")
         np.save(t0_path, np.array([t0]))
 
-        duration_s = (imu_arr[-1, 6] - imu_arr[0, 6]) / 1_000_000
+        duration_s = (imu_arr[-1, 13] - imu_arr[0, 13]) / 1_000_000
         print(f"\n{'='*60}")
         print(f"  ✅ 录制数据已保存: {save_dir}/")
         print(f"     {prefix}_imu_{freq}.npy            — {imu_arr.shape} float64")
-        print(f"       列: gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z, timestamp_us")
+        print(f"       列: gyro(3) + accel(3) + quat(4) + grav(3) + timestamp_us(1)")
         print(f"       时长: {duration_s:.1f}s, 帧数: {T}")
         print(f"     {prefix}_click_timestamps_{freq}.npy — {click_ts.shape} float64")
         print(f"       敲击数: {len(click_ts)} (Unix 秒)")
@@ -221,8 +247,10 @@ def collect(port: str, save_dir: str, use_wifi: bool = True,
             except Exception:
                 break
             t = time.time()
-            gx, gy, gz, ax, ay, az = parse_osc_bundle(raw)
-            collector.add_imu(t, gx, gy, gz, ax, ay, az)
+            (gx, gy, gz, ax, ay, az,
+             qx, qy, qz, qw, grx, gry, grz) = parse_osc_bundle(raw)
+            collector.add_imu(t, gx, gy, gz, ax, ay, az,
+                              qx, qy, qz, qw, grx, gry, grz)
         sock.close()
 
     osc_thread = threading.Thread(target=osc_loop, daemon=True)
@@ -322,12 +350,16 @@ def inspect(data_dir: str):
 
     print(f"IMU shape: {imu.shape}")
     print(f"Clicks: {len(clicks)}")
-    print(f"时长: {(imu[-1, 6] - imu[0, 6]) / 1_000_000:.1f}s")
+    # 时间戳永远是最后一列 (旧格式 col 6, 新格式 col 13)
+    ts_col = imu.shape[1] - 1
+    print(f"时长: {(imu[-1, ts_col] - imu[0, ts_col]) / 1_000_000:.1f}s")
+    print(f"通道数: {imu.shape[1] - 1} (列: gyro(3)+accel(3)"
+          f"{'+quat(4)+grav(3)' if imu.shape[1] >= 13 else ''})")
 
-    # 画图: 6 通道 + 敲击标记
+    # 画图: 前 6 通道 + 敲击标记
     fig, axes = plt.subplots(3, 2, figsize=(14, 10))
     titles = ["Gyro X", "Gyro Y", "Gyro Z", "Accel X", "Accel Y", "Accel Z"]
-    t_axis = imu[:, 6] / 1_000_000  # 微秒 → 秒
+    t_axis = imu[:, ts_col] / 1_000_000  # 微秒 → 秒
 
     for ch in range(6):
         ax = axes[ch // 2, ch % 2]
