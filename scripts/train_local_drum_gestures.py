@@ -57,6 +57,7 @@ EXCLUDE_AFTER_PEAK = 24
 HARD_NEGATIVES_PER_FILE = 160
 SEED = 42
 LABEL_IDS = (1, 2, 3, 4)
+LABEL_LAST_DIGIT = False
 
 _TEMP_DIR_HANDLES: list[tempfile.TemporaryDirectory] = []
 
@@ -87,6 +88,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-dir", default=str(ROOT / "analysis_outputs"))
     parser.add_argument("--run-name", default="local_drum_4gesture_lead6_gap_raw6")
     parser.add_argument("--labels", type=parse_int_tuple, default=LABEL_IDS)
+    parser.add_argument(
+        "--source-filter",
+        default="",
+        help="Optional comma-separated user_label filters, e.g. lqw_1,lqw_2,wxt_1,wxt_2.",
+    )
+    parser.add_argument(
+        "--latest-per-source",
+        action="store_true",
+        help="After source filtering, keep only the newest recording for each user+label.",
+    )
+    parser.add_argument(
+        "--label-last-digit",
+        action="store_true",
+        help="Interpret multi-digit suffixes such as lqw_22 as label 2.",
+    )
     parser.add_argument("--window", type=int, default=WINDOW)
     parser.add_argument("--lead-end-offsets", type=parse_int_tuple, default=LEAD_END_OFFSETS)
     parser.add_argument("--peak-search-samples", type=int, default=PEAK_SEARCH_EACH_SIDE)
@@ -111,6 +127,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dropout", type=float, default=0.05)
     parser.add_argument("--cutout", type=float, default=0.05)
     parser.add_argument("--hard-negatives-per-file", type=int, default=HARD_NEGATIVES_PER_FILE)
+    parser.add_argument("--balance-classes", action="store_true")
+    parser.add_argument("--split-mode", choices=["group", "random"], default="group")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--save-windows", action="store_true")
@@ -149,13 +167,30 @@ def parse_recording_name(name: str) -> tuple[str, str, int] | None:
     match = re.search(r"_(\d+)_([A-Za-z0-9]+)_(\d+)(?:\.npy|\.csv)$", name)
     if not match:
         return None
-    stamp, user, label = match.groups()
-    return stamp, user, int(label)
+    stamp, user, label_text = match.groups()
+    label = int(label_text[-1]) if LABEL_LAST_DIGIT else int(label_text)
+    return stamp, user, label
+
+
+def parse_source_filter(text: str) -> set[tuple[str, int]]:
+    sources = set()
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9]+)_(\d+)", item)
+        if not match:
+            raise ValueError(f"Invalid source filter item: {item}")
+        user, label_text = match.groups()
+        sources.add((user, int(label_text)))
+    return sources
 
 
 def collect_recordings(
     decrypted_dir: Path,
     label_ids: tuple[int, ...],
+    source_filter: set[tuple[str, int]] | None = None,
+    latest_per_source: bool = False,
 ) -> tuple[list[Recording], list[dict[str, str]]]:
     imu_by_stamp = {}
     serial_by_stamp = {}
@@ -208,6 +243,29 @@ def collect_recordings(
                 serial_path=serial_path,
             )
         )
+    if source_filter:
+        before = recordings
+        recordings = [
+            recording
+            for recording in recordings
+            if (recording.user, recording.label) in source_filter
+        ]
+        for recording in before:
+            if (recording.user, recording.label) not in source_filter:
+                skipped.append(
+                    {
+                        "file": recording.imu_path.name,
+                        "serial": recording.serial_path.name,
+                        "reason": "not selected by source filter",
+                    }
+                )
+    if latest_per_source:
+        latest: dict[tuple[str, int], Recording] = {}
+        for recording in recordings:
+            key = (recording.user, recording.label)
+            if key not in latest or int(recording.stamp) > int(latest[key].stamp):
+                latest[key] = recording
+        recordings = sorted(latest.values(), key=lambda item: (item.user, item.label, item.stamp))
     return recordings, skipped
 
 
@@ -494,6 +552,61 @@ def split_by_group(
     return x[train_mask], y[train_mask], x[val_mask], y[val_mask], x[test_mask], y[test_mask], split_info
 
 
+def split_random(
+    x: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    seed: int,
+    test_size: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    indices = np.arange(y.shape[0])
+    train_val_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        stratify=y,
+        random_state=seed,
+    )
+    train_idx, val_idx = train_test_split(
+        train_val_idx,
+        test_size=test_size,
+        stratify=y[train_val_idx],
+        random_state=seed,
+    )
+    split_info = {
+        "mode": "random_stratified",
+        "test_size": test_size,
+        "train_groups": sorted(set(groups[train_idx].astype(str).tolist())),
+        "val_groups": sorted(set(groups[val_idx].astype(str).tolist())),
+        "test_groups": sorted(set(groups[test_idx].astype(str).tolist())),
+    }
+    return x[train_idx], y[train_idx], x[val_idx], y[val_idx], x[test_idx], y[test_idx], split_info
+
+
+def balance_classes(
+    x: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    rng = np.random.default_rng(seed)
+    labels, counts = np.unique(y, return_counts=True)
+    target = int(counts.min())
+    selected_parts = []
+    for label in labels:
+        label_indices = np.where(y == label)[0]
+        selected = rng.choice(label_indices, size=target, replace=False)
+        selected_parts.append(selected)
+    selected_indices = np.concatenate(selected_parts)
+    rng.shuffle(selected_indices)
+    info = {
+        "enabled": True,
+        "target_per_class": target,
+        "before": {str(label): int(count) for label, count in zip(labels, counts)},
+        "after": {str(label): target for label in labels},
+    }
+    return x[selected_indices], y[selected_indices], groups[selected_indices], info
+
+
 def standardize_channel_groups(
     x_train: np.ndarray,
     x_val: np.ndarray,
@@ -574,15 +687,25 @@ def train_model(
     cutout: float,
     test_size: float,
     feature_mode: str,
+    split_mode: str,
 ) -> dict:
     set_seed(seed)
-    x_train, y_train, x_val, y_val, x_test, y_test, split_info = split_by_group(
-        x,
-        y,
-        groups,
-        seed,
-        test_size,
-    )
+    if split_mode == "random":
+        x_train, y_train, x_val, y_val, x_test, y_test, split_info = split_random(
+            x,
+            y,
+            groups,
+            seed,
+            test_size,
+        )
+    else:
+        x_train, y_train, x_val, y_val, x_test, y_test, split_info = split_by_group(
+            x,
+            y,
+            groups,
+            seed,
+            test_size,
+        )
     x_train, x_val, x_test, stats = standardize_channel_groups(
         x_train,
         x_val,
@@ -691,6 +814,7 @@ def main() -> int:
     global EXCLUDE_BEFORE_PEAK
     global EXCLUDE_AFTER_PEAK
     global LABEL_IDS
+    global LABEL_LAST_DIGIT
 
     WINDOW = int(args.window)
     LEAD_END_OFFSETS = tuple(args.lead_end_offsets)
@@ -698,6 +822,7 @@ def main() -> int:
     EXCLUDE_BEFORE_PEAK = int(args.exclude_before_peak)
     EXCLUDE_AFTER_PEAK = int(args.exclude_after_peak)
     LABEL_IDS = tuple(args.labels)
+    LABEL_LAST_DIGIT = bool(args.label_last_digit)
 
     data_dir = Path(args.data_dir).expanduser().resolve()
     work_dir = Path(args.work_dir).expanduser().resolve()
@@ -706,8 +831,14 @@ def main() -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     decrypted_dir = decrypt_dataset(data_dir, work_dir, args.keep_decrypted)
-    recordings, skipped = collect_recordings(decrypted_dir, LABEL_IDS)
-    if len(recordings) < 10:
+    source_filter = parse_source_filter(args.source_filter) if args.source_filter else None
+    recordings, skipped = collect_recordings(
+        decrypted_dir,
+        LABEL_IDS,
+        source_filter=source_filter,
+        latest_per_source=args.latest_per_source,
+    )
+    if len(recordings) < max(2, len(LABEL_IDS)):
         raise SystemExit(f"Too few labeled recordings found: {len(recordings)}")
 
     x, y, groups, dataset_summary = build_dataset(
@@ -718,10 +849,31 @@ def main() -> int:
         serial_edge=args.serial_edge,
         feature_mode=args.feature_mode,
     )
+    balance_info = {"enabled": False}
+    if args.balance_classes:
+        x, y, groups, balance_info = balance_classes(x, y, groups, args.seed)
     dataset_summary["skipped_files"] = skipped
     dataset_summary["recording_count"] = len(recordings)
+    dataset_summary["selected_recordings"] = [
+        {
+            "stamp": recording.stamp,
+            "user": recording.user,
+            "label": recording.label,
+            "imu_file": recording.imu_path.name,
+            "serial_file": recording.serial_path.name,
+        }
+        for recording in recordings
+    ]
     dataset_summary["hard_negatives_per_file"] = args.hard_negatives_per_file
     dataset_summary["label_ids"] = list(LABEL_IDS)
+    dataset_summary["source_filter"] = sorted([f"{user}_{label}" for user, label in source_filter]) if source_filter else []
+    dataset_summary["latest_per_source"] = bool(args.latest_per_source)
+    dataset_summary["label_last_digit"] = bool(args.label_last_digit)
+    dataset_summary["balance_classes"] = balance_info
+    dataset_summary["balanced_x_shape"] = list(x.shape)
+    dataset_summary["balanced_label_counts"] = {
+        str(label): int(count) for label, count in zip(*np.unique(y, return_counts=True))
+    }
 
     if args.save_windows:
         windows_dir = work_dir / "windows"
@@ -757,6 +909,7 @@ def main() -> int:
         args.cutout,
         args.test_size,
         args.feature_mode,
+        args.split_mode,
     )
     print(json.dumps(train_summary, ensure_ascii=False, indent=2))
     return 0

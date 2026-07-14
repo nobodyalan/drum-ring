@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,30 +11,60 @@ from tsai.models.InceptionTime import InceptionTime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHECKPOINT_PATH = (
-    PROJECT_ROOT / "checkpoint" / "drum_gesture" / "linacc_early_stream_lead6_deep_gap_raw6.pth"
+    PROJECT_ROOT
+    / "checkpoint"
+    / "drum_gesture"
+    / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth"
 )
 
-WINDOW_SIZE = 15
+WINDOW_SIZE = 20
 PRE_PEAK_FRAMES = 12
 POST_PEAK_FRAMES = 2
 GRAVITY = 9.81
 
-DRUM_CLASS_IDS = tuple(range(8))
+DRUM_CLASS_IDS = tuple(range(5))
 DRUM_CLASS_LABELS = {
     0: "空",
     1: "踩镲",
     2: "通鼓2",
     3: "军鼓",
     4: "通鼓1",
-    5: "通鼓3",
-    6: "吊镲",
-    7: "节奏镲",
 }
 
-ACC_MEAN = 1.1428884267807007
-ACC_STD = 12.995551109313965
-GYRO_MEAN = 0.5434064269065857
-GYRO_STD = 3.6908280849456787
+FEATURE_MODE = "rawlin12_handcrafted"
+FEATURE_CHANNELS = 21
+RAW_ACC_MEAN = 0.43534696102142334
+RAW_ACC_STD = 7.724777698516846
+RAW_GYRO_MEAN = -0.5989146828651428
+RAW_GYRO_STD = 2.7989652156829834
+LINEAR_ACC_MEAN = 2.775578498840332
+LINEAR_ACC_STD = 8.29115104675293
+GYRO_MEAN = -0.5989146828651428
+GYRO_STD = 2.7989652156829834
+HANDCRAFTED_STATS = {
+    12: ("raw_acc_norm", 11.019449234008789, 7.626066207885742),
+    13: ("linear_acc_norm", 12.995800018310547, 7.774975299835205),
+    14: ("raw_gyro_norm", 3.9171178340911865, 3.0388989448547363),
+    15: ("gyro_norm", 3.9171178340911865, 3.0388989448547363),
+    16: ("raw_acc_delta_norm", 1.2930601835250854, 3.9165213108062744),
+    17: ("linear_acc_delta_norm", 1.237756371498108, 3.907350778579712),
+    18: ("gyro_delta_norm", 0.44010719656944275, 0.5516814589500427),
+    19: ("raw_linear_dot", 156.3450469970703, 633.968017578125),
+    20: ("raw_linear_cos", 0.5807366371154785, 0.5196294784545898),
+}
+
+DEFAULT_STANDARDIZE_STATS = {
+    "raw_acc_mean": RAW_ACC_MEAN,
+    "raw_acc_std": RAW_ACC_STD,
+    "raw_gyro_mean": RAW_GYRO_MEAN,
+    "raw_gyro_std": RAW_GYRO_STD,
+    "linear_acc_mean": LINEAR_ACC_MEAN,
+    "linear_acc_std": LINEAR_ACC_STD,
+    "gyro_mean": GYRO_MEAN,
+    "gyro_std": GYRO_STD,
+    **{name + "_mean": mean for _channel, (name, mean, _std) in HANDCRAFTED_STATS.items()},
+    **{name + "_std": std for _channel, (name, _mean, std) in HANDCRAFTED_STATS.items()},
+}
 
 
 @dataclass(frozen=True)
@@ -218,6 +249,58 @@ class OnlineLinearAccelerationEstimator:
         return linear_acc.astype(np.float32), gravity_sensor.astype(np.float32)
 
 
+def _norm(values: np.ndarray) -> np.ndarray:
+    return np.linalg.norm(values, axis=1, keepdims=True).astype(np.float32)
+
+
+def _delta(values: np.ndarray) -> np.ndarray:
+    return np.diff(values, axis=0, prepend=values[:1]).astype(np.float32)
+
+
+def build_rawlin12_handcrafted_window(
+    raw_linear_window: np.ndarray,
+    window_size: int | None = None,
+) -> np.ndarray:
+    values = np.asarray(raw_linear_window, dtype=np.float32)
+    expected_window = int(window_size or WINDOW_SIZE)
+    if values.shape != (expected_window, 12):
+        raise ValueError(f"输入窗口必须为 ({expected_window}, 12)，收到: {values.shape}")
+    raw_acc = values[:, 0:3]
+    raw_gyro = values[:, 3:6]
+    linear_acc = values[:, 6:9]
+    gyro = values[:, 9:12]
+
+    raw_acc_norm = _norm(raw_acc)
+    linear_acc_norm = _norm(linear_acc)
+    raw_gyro_norm = _norm(raw_gyro)
+    gyro_norm = _norm(gyro)
+    raw_acc_delta_norm = _norm(_delta(raw_acc))
+    linear_acc_delta_norm = _norm(_delta(linear_acc))
+    gyro_delta_norm = _norm(_delta(gyro))
+    raw_linear_dot = np.sum(raw_acc * linear_acc, axis=1, keepdims=True).astype(np.float32)
+    raw_linear_cos = (raw_linear_dot / np.maximum(raw_acc_norm * linear_acc_norm, 1e-6)).astype(
+        np.float32
+    )
+    return np.concatenate(
+        [
+            raw_acc,
+            raw_gyro,
+            linear_acc,
+            gyro,
+            raw_acc_norm,
+            linear_acc_norm,
+            raw_gyro_norm,
+            gyro_norm,
+            raw_acc_delta_norm,
+            linear_acc_delta_norm,
+            gyro_delta_norm,
+            raw_linear_dot,
+            raw_linear_cos,
+        ],
+        axis=1,
+    ).astype(np.float32)
+
+
 class DrumGestureRecognizer:
     def __init__(self, checkpoint_path: str | Path | None = None, device: str = "cpu") -> None:
         self.device = torch.device(device)
@@ -227,30 +310,76 @@ class DrumGestureRecognizer:
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(f"未找到 drum gesture checkpoint: {self.checkpoint_path}")
 
+        self.standardize_stats, self.window_size = self._load_eval_metadata()
         checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
         state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
         fc_weight = state_dict.get("fc.weight")
         if fc_weight is None:
             raise KeyError("checkpoint 缺少 fc.weight，无法确定类别数")
         class_count = int(fc_weight.shape[0])
-        self.model = RegularizedInceptionTime(c_in=6, c_out=class_count, head="gap")
+        c_in = self._infer_input_channels(state_dict)
+        self.input_channels = c_in
+        self.model = RegularizedInceptionTime(c_in=c_in, c_out=class_count, head="gap")
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
 
-    def prepare(self, linear_window: np.ndarray) -> np.ndarray:
-        values = np.asarray(linear_window, dtype=np.float32)
-        if values.shape != (WINDOW_SIZE, 6):
-            raise ValueError(f"输入窗口必须为 ({WINDOW_SIZE}, 6)，收到: {values.shape}")
+    def _load_eval_metadata(self) -> tuple[dict[str, float], int]:
+        stats = dict(DEFAULT_STANDARDIZE_STATS)
+        window_size = WINDOW_SIZE
+        eval_path = self.checkpoint_path.with_name(f"{self.checkpoint_path.stem}_eval.json")
+        if not eval_path.exists():
+            return stats, window_size
+
+        with eval_path.open("r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        standardize_stats = metadata.get("standardize_stats", {})
+        if isinstance(standardize_stats, dict):
+            for key, value in standardize_stats.items():
+                if isinstance(value, (int, float)):
+                    stats[key] = float(value)
+        input_shape = metadata.get("input_shape")
+        if isinstance(input_shape, list) and len(input_shape) >= 2:
+            window_size = int(input_shape[1])
+        return stats, window_size
+
+    def _infer_input_channels(self, state_dict: dict[str, torch.Tensor]) -> int:
+        for key, value in state_dict.items():
+            if key.endswith("bottleneck.weight") and value.ndim == 3:
+                return int(value.shape[1])
+        return FEATURE_CHANNELS
+
+    def prepare(self, raw_linear_window: np.ndarray) -> np.ndarray:
+        values = np.asarray(raw_linear_window, dtype=np.float32)
+        if self.input_channels == FEATURE_CHANNELS:
+            values = build_rawlin12_handcrafted_window(values, self.window_size)
+        elif self.input_channels == 6:
+            if values.shape == (self.window_size, 12):
+                values = values[:, 6:12]
+            if values.shape != (self.window_size, 6):
+                raise ValueError(f"输入窗口必须为 ({self.window_size}, 6)，收到: {values.shape}")
+        else:
+            raise ValueError(f"不支持的 drum gesture 输入通道数: {self.input_channels}")
         values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
         values = values.T.copy()
-        values[:3, :] = (values[:3, :] - ACC_MEAN) / ACC_STD
-        values[3:, :] = (values[3:, :] - GYRO_MEAN) / GYRO_STD
+        stats = self.standardize_stats
+        if self.input_channels == FEATURE_CHANNELS:
+            values[0:3, :] = (values[0:3, :] - stats["raw_acc_mean"]) / stats["raw_acc_std"]
+            values[3:6, :] = (values[3:6, :] - stats["raw_gyro_mean"]) / stats["raw_gyro_std"]
+            values[6:9, :] = (values[6:9, :] - stats["linear_acc_mean"]) / stats["linear_acc_std"]
+            values[9:12, :] = (values[9:12, :] - stats["gyro_mean"]) / stats["gyro_std"]
+            for channel, (_name, mean, std) in HANDCRAFTED_STATS.items():
+                channel_mean = stats.get(f"{_name}_mean", mean)
+                channel_std = stats.get(f"{_name}_std", std)
+                values[channel, :] = (values[channel, :] - channel_mean) / channel_std
+        else:
+            values[:3, :] = (values[:3, :] - stats["linear_acc_mean"]) / stats["linear_acc_std"]
+            values[3:, :] = (values[3:, :] - stats["gyro_mean"]) / stats["gyro_std"]
         return values
 
     @torch.inference_mode()
-    def predict(self, linear_window: np.ndarray) -> DrumGesturePrediction:
-        prepared = self.prepare(linear_window)
+    def predict(self, raw_linear_window: np.ndarray) -> DrumGesturePrediction:
+        prepared = self.prepare(raw_linear_window)
         inputs = torch.from_numpy(prepared).unsqueeze(0).to(self.device)
         logits = self.model(inputs)
         probs = torch.softmax(logits[0], dim=0).cpu().numpy().astype(np.float32, copy=False)

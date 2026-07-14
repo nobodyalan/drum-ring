@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QComboBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -32,7 +33,6 @@ from apps.framework.ui_style import APP_STYLE_SHEET
 from models.drum_gesture_recognizer import (
     DRUM_CLASS_IDS,
     DRUM_CLASS_LABELS,
-    WINDOW_SIZE,
     DrumGestureRecognizer,
     OnlineLinearAccelerationEstimator,
 )
@@ -40,10 +40,96 @@ from models.drum_gesture_recognizer import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = (
-    PROJECT_ROOT / "checkpoint" / "drum_gesture" / "linacc_early_stream_lead6_deep_gap_raw6.pth"
+    PROJECT_ROOT
+    / "checkpoint"
+    / "drum_gesture"
+    / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth"
 )
+MODEL_OPTIONS = [
+    (
+        "w20 lead6,4,2",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth",
+        20,
+    ),
+    (
+        "w15 lead6,4,2",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w15_lead642_rawlin12hc_balanced_random.pth",
+        15,
+    ),
+    (
+        "w10 lead6,4,2",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w10_lead642_rawlin12hc_balanced_random.pth",
+        10,
+    ),
+    (
+        "w15 lead10,8,6,4",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w15_lead10864_rawlin12hc_balanced_random.pth",
+        15,
+    ),
+    (
+        "w15 lead18,16,14,12",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w15_lead18161412_rawlin12hc_balanced_random.pth",
+        15,
+    ),
+    (
+        "w15 lead22,20,18,16",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w15_lead22201816_rawlin12hc_balanced_random.pth",
+        15,
+    ),
+    (
+        "w10 lead10,8,6,4",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w10_lead10864_rawlin12hc_balanced_random.pth",
+        10,
+    ),
+    (
+        "w10 lead14,12,10,8",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w10_lead1412108_rawlin12hc_balanced_random.pth",
+        10,
+    ),
+    (
+        "w10 lead18,16,14,12",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w10_lead18161412_rawlin12hc_balanced_random.pth",
+        10,
+    ),
+    (
+        "w10 lead22,20,18,16",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_plus_latest_w10_lead22201816_rawlin12hc_balanced_random.pth",
+        10,
+    ),
+]
 SOUND_DIR = PROJECT_ROOT / "assets" / "drum_gesture" / "sounds"
 IMU_SAMPLE_RATE_HZ = 200.0
+SOUND_VOICES_PER_CLASS = 4
 
 DRUM_CLASS_COLORS = {
     0: QColor("#B0B8C1"),
@@ -51,18 +137,12 @@ DRUM_CLASS_COLORS = {
     2: QColor("#61DDAA"),
     3: QColor("#F6BD16"),
     4: QColor("#E8684A"),
-    5: QColor("#6DC8EC"),
-    6: QColor("#9270CA"),
-    7: QColor("#FF9D4D"),
 }
 DRUM_SOUND_FILES = {
     1: SOUND_DIR / "gesture_1_closed_hat.wav",
     2: SOUND_DIR / "gesture_2_tom2.wav",
     3: SOUND_DIR / "gesture_3_snare.wav",
     4: SOUND_DIR / "gesture_4_tom1.wav",
-    5: SOUND_DIR / "gesture_5_tom3.wav",
-    6: SOUND_DIR / "gesture_6_crash.wav",
-    7: SOUND_DIR / "gesture_7_ride.wav",
 }
 
 
@@ -88,6 +168,7 @@ class DrumInferenceResult:
 
 @dataclass(frozen=True)
 class DrumInferenceFailure:
+    address: str
     ring_name: str
     error: str
 
@@ -101,16 +182,14 @@ class DrumInferenceWorker(QThread):
     def __init__(self, model_path: Path):
         super().__init__()
         self.model_path = Path(model_path)
-        self._jobs: queue.Queue[DrumInferenceJob | None] = queue.Queue(maxsize=1)
+        self._jobs: queue.Queue[DrumInferenceJob | None] = queue.Queue(maxsize=64)
         self._stopping = False
 
     def submit(self, job: DrumInferenceJob) -> None:
-        if self._jobs.full():
-            try:
-                self._jobs.get_nowait()
-            except queue.Empty:
-                pass
-        self._jobs.put_nowait(job)
+        try:
+            self._jobs.put_nowait(job)
+        except queue.Full:
+            pass
 
     def stop(self) -> None:
         self._stopping = True
@@ -138,7 +217,7 @@ class DrumInferenceWorker(QThread):
             try:
                 prediction = recognizer.predict(job.values)
             except Exception as exc:
-                self.job_failed.emit(DrumInferenceFailure(job.ring_name, str(exc)))
+                self.job_failed.emit(DrumInferenceFailure(job.address, job.ring_name, str(exc)))
                 continue
             self.result_ready.emit(
                 DrumInferenceResult(
@@ -175,13 +254,15 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.resize(1180, 780)
 
         self.model_path = Path(model_path).expanduser().resolve()
+        self.window_size = self.window_size_for_model(self.model_path)
         self.states: dict[str, DrumRingState] = {}
         self.active_address = ""
         self.active_result_address = ""
         self.runtime_ready = False
         self.runtime_failed = False
-        self.worker_busy = False
-        self.sound_effects: dict[int, QSoundEffect] = {}
+        self.in_flight_addresses: set[str] = set()
+        self.sound_effects: dict[int, list[QSoundEffect]] = {}
+        self.sound_voice_indices: dict[int, int] = {}
 
         self.stream_status_label = QLabel("数据流状态：未连接")
         self.stream_status_label.setObjectName("statusTag")
@@ -192,6 +273,11 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.buffer_label = QLabel("缓冲区：0 帧")
         self.fps_label = QLabel("结果帧率：0.0 Hz")
         self.peak_label = QLabel("最近峰值：-")
+
+        self.model_select = QComboBox()
+        for label, path, window_size in MODEL_OPTIONS:
+            self.model_select.addItem(label, (str(path.resolve()), int(window_size)))
+        self.select_current_model_option()
 
         self.chart = ProbabilityChart(
             class_ids=DRUM_CLASS_IDS,
@@ -247,12 +333,8 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.set_stream_status_label(self.stream_status_label)
         self._bind_signals()
 
-        self.worker = DrumInferenceWorker(self.model_path)
-        self.worker.ready.connect(self.on_worker_ready)
-        self.worker.result_ready.connect(self.on_inference_result)
-        self.worker.job_failed.connect(self.on_inference_failed)
-        self.worker.fatal_error.connect(self.on_worker_fatal_error)
-        self.worker.start()
+        self.worker: DrumInferenceWorker | None = None
+        self.start_worker()
         self.client.start()
 
     def _build_ui(self) -> None:
@@ -271,7 +353,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         title = QLabel("Drum Gesture 实时识别")
         title.setProperty("class", "title")
         desc = QLabel(
-            "在线估计 linear acceleration，持续滑窗推理最近 15 帧，稳定判定后触发对应鼓件音色。"
+            "在线估计 linear acceleration，持续滑窗推理最近窗口，稳定判定后触发对应鼓件音色。"
         )
         desc.setProperty("class", "sub-text")
         desc.setWordWrap(True)
@@ -300,18 +382,20 @@ class DrumGestureWindow(RingStreamWindowBase):
         settings.setContentsMargins(14, 12, 14, 12)
         settings.setHorizontalSpacing(16)
         settings.setVerticalSpacing(12)
-        settings.addWidget(QLabel("推理步长"), 0, 0)
-        settings.addWidget(self.step_input, 0, 1)
-        settings.addWidget(QLabel("置信阈值"), 0, 2)
-        settings.addWidget(self.confidence_threshold_input, 0, 3)
-        settings.addWidget(QLabel("冷却时间"), 1, 0)
-        settings.addWidget(self.cooldown_input, 1, 1)
-        settings.addWidget(QLabel("稳定窗口"), 1, 2)
-        settings.addWidget(self.stable_window_input, 1, 3)
-        settings.addWidget(QLabel("触发比例"), 2, 0)
-        settings.addWidget(self.trigger_ratio_input, 2, 1)
-        settings.addWidget(QLabel("音量"), 2, 2)
-        settings.addWidget(self.volume_input, 2, 3)
+        settings.addWidget(QLabel("模型"), 0, 0)
+        settings.addWidget(self.model_select, 0, 1, 1, 3)
+        settings.addWidget(QLabel("推理步长"), 1, 0)
+        settings.addWidget(self.step_input, 1, 1)
+        settings.addWidget(QLabel("置信阈值"), 1, 2)
+        settings.addWidget(self.confidence_threshold_input, 1, 3)
+        settings.addWidget(QLabel("冷却时间"), 2, 0)
+        settings.addWidget(self.cooldown_input, 2, 1)
+        settings.addWidget(QLabel("稳定窗口"), 2, 2)
+        settings.addWidget(self.stable_window_input, 2, 3)
+        settings.addWidget(QLabel("触发比例"), 3, 0)
+        settings.addWidget(self.trigger_ratio_input, 3, 1)
+        settings.addWidget(QLabel("音量"), 3, 2)
+        settings.addWidget(self.volume_input, 3, 3)
         panel_layout.addWidget(settings_panel)
 
         action_row = QHBoxLayout()
@@ -350,6 +434,7 @@ class DrumGestureWindow(RingStreamWindowBase):
     def _bind_signals(self) -> None:
         self.apply_btn.clicked.connect(self.apply_subscription)
         self.clear_btn.clicked.connect(self.clear_results)
+        self.model_select.currentIndexChanged.connect(self.on_model_selected)
         self.bind_stream_client_signals()
 
     def on_stream_connected(self) -> None:
@@ -386,7 +471,9 @@ class DrumGestureWindow(RingStreamWindowBase):
             np.asarray(gyr, dtype=np.float32),
             dt,
         )
-        sample = np.concatenate((linear_acc, np.asarray(gyr, dtype=np.float32))).astype(np.float32)
+        raw_acc = np.asarray(acc, dtype=np.float32)
+        raw_gyro = np.asarray(gyr, dtype=np.float32)
+        sample = np.concatenate((raw_acc, raw_gyro, linear_acc, raw_gyro)).astype(np.float32)
         state.samples.append(sample)
         state.norms.append(float(np.linalg.norm(linear_acc)))
         state.sample_count += 1
@@ -400,24 +487,30 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.maybe_submit_window(address)
 
     def maybe_submit_window(self, address: str) -> None:
-        if self.runtime_failed or not self.runtime_ready or self.worker_busy:
+        if (
+            self.worker is None
+            or self.runtime_failed
+            or not self.runtime_ready
+            or address in self.in_flight_addresses
+        ):
             return
         state = self.states.get(address)
-        if state is None or len(state.samples) < WINDOW_SIZE:
+        window_size = int(self.window_size)
+        if state is None or len(state.samples) < window_size:
             return
 
         step = int(self.step_input.value())
         if state.frames_since_infer < step:
             return
 
-        values = np.stack(list(state.samples)[-WINDOW_SIZE:], axis=0).astype(np.float32, copy=False)
-        if values.shape != (WINDOW_SIZE, 6):
+        values = np.stack(list(state.samples)[-window_size:], axis=0).astype(np.float32, copy=False)
+        if values.shape != (window_size, 12):
             return
 
         state.frames_since_infer = 0
         window_end = state.sample_count - 1
-        window_peak = float(max(list(state.norms)[-WINDOW_SIZE:]))
-        self.worker_busy = True
+        window_peak = float(max(list(state.norms)[-window_size:]))
+        self.in_flight_addresses.add(address)
         self.worker.submit(
             DrumInferenceJob(
                 address=address,
@@ -431,18 +524,22 @@ class DrumGestureWindow(RingStreamWindowBase):
 
     def on_worker_ready(self) -> None:
         self.runtime_ready = True
-        self.device_label.setText(f"模型：{self.display_path(self.model_path)} | 已就绪")
+        self.device_label.setText(
+            f"模型：{self.current_model_label()} | window={self.window_size} | 已就绪"
+        )
         self.set_runtime_status("状态：模型已就绪，等待 IMU 数据")
 
     def on_worker_fatal_error(self, message: str) -> None:
         self.runtime_failed = True
         self.runtime_ready = False
-        self.worker_busy = False
-        self.device_label.setText(f"模型：{self.display_path(self.model_path)} | 加载失败")
+        self.in_flight_addresses.clear()
+        self.device_label.setText(
+            f"模型：{self.current_model_label()} | window={self.window_size} | 加载失败"
+        )
         self.set_runtime_status(f"状态：{message}")
 
     def on_inference_result(self, result: DrumInferenceResult) -> None:
-        self.worker_busy = False
+        self.in_flight_addresses.discard(result.address)
         state = self.state_for(result.address)
         self.active_result_address = result.address
         state.rate_tracker.mark()
@@ -484,10 +581,18 @@ class DrumGestureWindow(RingStreamWindowBase):
             )
         self.update_count_views(state.committed_counts)
         self.maybe_submit_window(result.address)
+        self.submit_ready_windows(exclude_address=result.address)
 
     def on_inference_failed(self, failure: DrumInferenceFailure) -> None:
-        self.worker_busy = False
+        self.in_flight_addresses.discard(failure.address)
         self.set_runtime_status(f"状态：{failure.ring_name} 推理失败（{failure.error}）")
+        self.submit_ready_windows()
+
+    def submit_ready_windows(self, exclude_address: str = "") -> None:
+        for address in list(self.states):
+            if address == exclude_address:
+                continue
+            self.maybe_submit_window(address)
 
     def result_queue_length(self) -> int:
         step = max(int(self.step_input.value()), 1)
@@ -529,7 +634,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.states.clear()
         self.active_address = ""
         self.active_result_address = ""
-        self.worker_busy = False
+        self.in_flight_addresses.clear()
         self.chart.clear()
         self.result_label.setText("--")
         self.result_meta_label.setText("最近结果：无")
@@ -540,22 +645,86 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.peak_label.setText("最近峰值：-")
         self.set_runtime_status("状态：结果已清空，等待 IMU 数据")
 
+    def start_worker(self) -> None:
+        self.runtime_ready = False
+        self.runtime_failed = False
+        self.in_flight_addresses.clear()
+        self.device_label.setText(
+            f"模型：{self.current_model_label()} | window={self.window_size} | 加载中"
+        )
+        self.worker = DrumInferenceWorker(self.model_path)
+        self.worker.ready.connect(self.on_worker_ready)
+        self.worker.result_ready.connect(self.on_inference_result)
+        self.worker.job_failed.connect(self.on_inference_failed)
+        self.worker.fatal_error.connect(self.on_worker_fatal_error)
+        self.worker.start()
+
+    def stop_worker(self) -> None:
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker = None
+
+    def on_model_selected(self) -> None:
+        data = self.model_select.currentData()
+        if not data:
+            return
+        path_text, window_size = data
+        selected_path = Path(path_text).expanduser().resolve()
+        if selected_path == self.model_path and int(window_size) == int(self.window_size):
+            return
+
+        self.stop_worker()
+        self.model_path = selected_path
+        self.window_size = int(window_size)
+        self.clear_results()
+        self.start_worker()
+
+    def current_model_label(self) -> str:
+        text = self.model_select.currentText()
+        if text:
+            return text
+        return self.display_path(self.model_path)
+
+    def select_current_model_option(self) -> None:
+        resolved = self.model_path.resolve()
+        for index in range(self.model_select.count()):
+            data = self.model_select.itemData(index)
+            if data and Path(data[0]).resolve() == resolved:
+                self.model_select.setCurrentIndex(index)
+                return
+
+    def window_size_for_model(self, model_path: Path) -> int:
+        resolved = Path(model_path).expanduser().resolve()
+        for _label, path, window_size in MODEL_OPTIONS:
+            if path.resolve() == resolved:
+                return int(window_size)
+        return 20
+
     def load_sound_effects(self) -> None:
         self.sound_effects.clear()
+        self.sound_voice_indices.clear()
         for class_id, path in DRUM_SOUND_FILES.items():
-            effect = QSoundEffect(self)
-            effect.setSource(QUrl.fromLocalFile(str(path.resolve())))
-            effect.setVolume(float(self.volume_input.value()))
-            self.sound_effects[class_id] = effect
+            voices = []
+            for _index in range(SOUND_VOICES_PER_CLASS):
+                effect = QSoundEffect(self)
+                effect.setSource(QUrl.fromLocalFile(str(path.resolve())))
+                effect.setVolume(float(self.volume_input.value()))
+                voices.append(effect)
+            self.sound_effects[class_id] = voices
+            self.sound_voice_indices[class_id] = 0
 
     def on_volume_changed(self, value: float) -> None:
-        for effect in self.sound_effects.values():
-            effect.setVolume(float(value))
+        for voices in self.sound_effects.values():
+            for effect in voices:
+                effect.setVolume(float(value))
 
     def play_gesture_sound(self, class_id: int) -> None:
-        effect = self.sound_effects.get(class_id)
-        if effect is None:
+        voices = self.sound_effects.get(class_id)
+        if not voices:
             return
+        index = int(self.sound_voice_indices.get(class_id, 0)) % len(voices)
+        self.sound_voice_indices[class_id] = (index + 1) % len(voices)
+        effect = voices[index]
         if effect.isPlaying():
             effect.stop()
         effect.play()
@@ -570,11 +739,13 @@ class DrumGestureWindow(RingStreamWindowBase):
         _ = rings
         for address in removed_addresses:
             self.states.pop(address, None)
+            self.in_flight_addresses.discard(address)
         for address in changed_connection_addresses:
             ring = self.ring_info.get(address)
             connected = bool(ring.get("connected", False)) if ring is not None else False
             if not connected:
                 self.states.pop(address, None)
+                self.in_flight_addresses.discard(address)
 
     def state_for(self, address: str) -> DrumRingState:
         state = self.states.get(address)
@@ -636,7 +807,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         return dt
 
     def closeEvent(self, event) -> None:
-        self.worker.stop()
+        self.stop_worker()
         self.client.stop()
         self.client.wait(1500)
         event.accept()
