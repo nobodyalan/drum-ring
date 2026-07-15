@@ -1,15 +1,36 @@
 """
 可视化单个 session 的 IMU 数据 + 踩踏时刻标注
 ==============================================
-读取 train_data/ 下的一个 session，画出 6 通道 IMU 波形，
-并在 Arduino 检测到的踩踏瞬间画竖线标注。
+读取 train_data/ 下的一个 session，画出 gyro/accel/gravity/derived 通道波形。
+红色虚线 = Arduino 触发, 蓝色实线 = 峰值对齐参考点, 绿色区域 = hit zone.
+
+────────────────────────────────────────────────────────────────────────────
+参数:
+  session                  Session 名称或路径
+  --data-dir DIR           数据目录 (默认: train_data)
+  --range T_MIN T_MAX      显示的时间范围 (秒)
+  --clicks START END       显示第 START 到 END 次踩踏
+  --accel-only             只看加速度通道
+  --save PATH              保存图片到文件
+  --title TITLE            自定义标题
+  --list                   列出所有可用 session
+  --pre MS                 hit zone 前向 ms (默认: 70)
+  --post MS                hit zone 后向 ms (默认: 150)
+  --search-pre-ms MS       峰值搜索前向 ms (默认: 0)
+  --search-post-ms MS      峰值搜索后向 ms (默认: 100)
+  --no-refine              不做峰值对齐，直接显示原始 Arduino 位置
 
 用法:
-  python visualize_session.py w_0                          # 画 w_0 的全部数据
-  python visualize_session.py w_0 --range 10 30            # 只画 10-30 秒
-  python visualize_session.py w_0 --clicks 5 15            # 只看第 5-15 次踩踏
-  python visualize_session.py w_0 --accel-only             # 只看加速度 3 通道
-  python visualize_session.py --list                       # 列出所有可用 session
+  python visualize_session.py w_0
+  python visualize_session.py w_0 --range 5 20
+  python visualize_session.py w_0 --clicks 10 25
+  python visualize_session.py w_0 --accel-only
+  python visualize_session.py w_0 --pre 150 --post -20         # 零延迟 hit zone
+  python visualize_session.py w_0 --search-post-ms 120         # 调整峰值搜索窗口
+  python visualize_session.py w_0 --no-refine                  # 看原始 Arduino 位置
+  python visualize_session.py w_0 --save plot.png
+  python visualize_session.py --list
+  python visualize_session.py --list --data-dir ../other_data
 """
 
 import os
@@ -84,11 +105,45 @@ CHANNEL_COLORS = ["#e74c3c", "#2ecc71", "#3498db", "#e67e22", "#9b59b6", "#1abc9
 CHANNEL_UNITS = ["rad/s", "rad/s", "rad/s", "g", "g", "g"]
 
 
+def refine_clicks_to_peaks(t_rel: np.ndarray, click_rel: np.ndarray,
+                            imu_data: np.ndarray,
+                            search_pre_ms: int = 0,
+                            search_post_ms: int = 100) -> np.ndarray:
+    """
+    Align Arduino click to accel_mag global max in [click, click+120ms].
+
+    True impact always within 0-120ms post-trigger. Bounce at 150ms+
+    is naturally excluded. Global argmax is safe in this narrow window.
+    """
+    if len(click_rel) == 0:
+        return click_rel.copy()
+
+    ax = imu_data[:, 3].astype(np.float64)
+    ay = imu_data[:, 4].astype(np.float64)
+    az = imu_data[:, 5].astype(np.float64)
+    accel_mag = np.sqrt(ax**2 + ay**2 + az**2)
+
+    refined = []
+    for c in click_rel:
+        # Time-mask for exact [click+pre, click+post] window
+        mask = (t_rel >= c - search_pre_ms / 1000.0) &                (t_rel <= c + search_post_ms / 1000.0)
+        if mask.any():
+            peak_offset = np.argmax(accel_mag[mask])
+            refined.append(t_rel[mask][peak_offset])
+        else:
+            refined.append(c)
+
+    return np.array(refined, dtype=click_rel.dtype)
+
+
+
 def plot_session(session: dict, t_range: tuple | None = None,
                  click_range: tuple | None = None,
                  accel_only: bool = False, title: str | None = None,
                  save_path: str | None = None,
-                 pre_ms: int = 70, post_ms: int = 150):
+                 pre_ms: int = 70, post_ms: int = 150,
+                 search_pre_ms: int = 0, search_post_ms: int = 100,
+                 no_refine: bool = False):
     """核心绘图函数.
        pre_ms/post_ms: 击打区扩展 ms, 控制绿色 hit zone 显示范围 (默认 70/150)."""
 
@@ -120,6 +175,19 @@ def plot_session(session: dict, t_range: tuple | None = None,
     t_plot = t_rel[mask]
     imu_plot = imu[mask]
     clicks_in = clicks[(clicks >= t_min) & (clicks <= t_max)]
+
+    # ── 峰值对齐: 将 Arduino 点击对齐到最近的 accel_mag 峰值 ──
+    if not no_refine and len(clicks_in) > 0:
+        refined_clicks = refine_clicks_to_peaks(
+            t_rel, clicks_in, imu, search_pre_ms, search_post_ms)
+        # 打印每次点击的偏移量
+        shifts_ms = (refined_clicks - clicks_in) * 1000
+        print(f"\n  峰值对齐偏移 (peak - Arduino):")
+        for ci, s in enumerate(shifts_ms):
+            print(f"    click #{ci+1}: {s:+.0f}ms")
+        print(f"    均值: {shifts_ms.mean():+.0f}ms, 标准差: {shifts_ms.std():.0f}ms")
+    else:
+        refined_clicks = clicks_in.copy() if len(clicks_in) > 0 else clicks_in
 
     # 计算 accel_mag (合加速度幅值)
     accel_mag = np.sqrt(imu_plot[:, 3]**2 + imu_plot[:, 4]**2 + imu_plot[:, 5]**2)
@@ -168,12 +236,15 @@ def plot_session(session: dict, t_range: tuple | None = None,
         ax.grid(True, alpha=0.2, lw=0.5)
         ax.set_xlim(t_min, t_max)
 
-        # ---- 标注正例 (Hit Zone: [click-10ms, click+190ms]) ----
-        for c in clicks_in:
-            # 击打线
-            ax.axvline(x=c, color="#e74c3c", lw=1.5, alpha=0.6, ls="-", zorder=3)
-            # Hit Zone 半透明绿色区域 = 正例标签
-            ax.axvspan(c - PRE_S, c + POST_S, color="#27ae60", alpha=0.10, zorder=0)
+        # ---- 标注正例 (Hit Zone: [peak-PRE_MS, peak+POST_MS]) ----
+        for ci, c_orig in enumerate(clicks_in):
+            c_peak = refined_clicks[ci]
+            # 原始 Arduino 触发线 (红色虚线)
+            ax.axvline(x=c_orig, color="#e74c3c", lw=1.2, alpha=0.55, ls="--", zorder=2)
+            # 峰值对齐后的参考线 (蓝色实线)
+            ax.axvline(x=c_peak, color="#2980b9", lw=1.8, alpha=0.75, ls="-", zorder=3)
+            # Hit Zone 半透明绿色区域 = 正例标签 (基于峰值)
+            ax.axvspan(c_peak - PRE_S, c_peak + POST_S, color="#27ae60", alpha=0.10, zorder=0)
 
     # ---- 第三排: 合加速度幅值 (accel magnitude) ----
     ax = axes[-1]
@@ -185,19 +256,24 @@ def plot_session(session: dict, t_range: tuple | None = None,
     ax.grid(True, alpha=0.2, lw=0.5)
     ax.set_xlim(t_min, t_max)
 
-    # Hit Zone 标注 + 编号
-    for ci, c in enumerate(clicks_in):
-        ax.axvline(x=c, color="#e74c3c", lw=1.5, alpha=0.6, ls="-", zorder=3)
-        ax.axvspan(c - PRE_S, c + POST_S, color="#27ae60", alpha=0.10, zorder=0)
+    # Hit Zone 标注 + 编号 (基于峰值对齐)
+    for ci, c_orig in enumerate(clicks_in):
+        c_peak = refined_clicks[ci]
+        # 原始 Arduino 触发线 (红色虚线)
+        ax.axvline(x=c_orig, color="#e74c3c", lw=1.2, alpha=0.55, ls="--", zorder=2)
+        # 峰值对齐后的参考线 (蓝色实线)
+        ax.axvline(x=c_peak, color="#2980b9", lw=1.5, alpha=0.7, ls="-", zorder=3)
+        # Hit Zone 基于峰值
+        ax.axvspan(c_peak - PRE_S, c_peak + POST_S, color="#27ae60", alpha=0.10, zorder=0)
 
-    # 在 magnitude 轴上标注每次踩踏的编号和时间偏移
-    T0 = clicks_in[0] if len(clicks_in) > 0 else t_min
-    for ci, c in enumerate(clicks_in):
-        dt = c - T0
+    # 在 magnitude 轴上标注每次踩踏的编号和时间偏移 (基于峰值)
+    T0 = refined_clicks[0] if len(refined_clicks) > 0 else t_min
+    for ci, c_peak in enumerate(refined_clicks):
+        dt = c_peak - T0
         y_top = ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else accel_mag.max() * 1.1
         ax.annotate(
             f"#{ci + 1}\n+{dt:.2f}s",
-            xy=(c, y_top * 0.88),
+            xy=(c_peak, y_top * 0.88),
             fontsize=5.5, color="#c0392b", fontweight="bold",
             ha="center", va="top",
             bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#e74c3c", alpha=0.7, lw=0.6),
@@ -266,9 +342,9 @@ def plot_session(session: dict, t_range: tuple | None = None,
 
     # 图例说明
     if is_positive:
-        footer_text = (f"[GREEN zone] = POSITIVE label (hit: click-{pre_ms}ms ~ click+{post_ms}ms)  |  "
+        footer_text = (f"[GREEN zone] = POSITIVE label (hit: peak-{pre_ms}ms ~ peak+{post_ms}ms)  |  "
                        "other = NEGATIVE label (background)  |  "
-                       "red line = Arduino click  |  "
+                       "red dashed = Arduino trigger  |  blue solid = accel_mag peak  |  "
                        "accel_mag = sqrt(ax^2+ay^2+az^2)")
     else:
         footer_text = ("ALL frames = NEGATIVE (background)  |  no stomp detected  |  "
@@ -329,6 +405,12 @@ def main():
                         help="击打前扩展 ms, 控制绿色 hit-zone 起点 (默认: 70)")
     parser.add_argument("--post", type=int, default=150,
                         help="击打后扩展 ms, 控制绿色 hit-zone 终点 (默认: 150)")
+    parser.add_argument("--search-pre-ms", type=int, default=0,
+                        help="峰值搜索窗口前向 ms (默认: 50)")
+    parser.add_argument("--search-post-ms", type=int, default=100,
+                        help="峰值搜索窗口后向 ms (默认: 200)")
+    parser.add_argument("--no-refine", action="store_true",
+                        help="不做峰值对齐，直接用原始 Arduino 时间戳")
 
     args = parser.parse_args()
 
@@ -416,6 +498,9 @@ def main():
         save_path=args.save,
         pre_ms=args.pre,
         post_ms=args.post,
+        search_pre_ms=args.search_pre_ms,
+        search_post_ms=args.search_post_ms,
+        no_refine=args.no_refine,
     )
 
 

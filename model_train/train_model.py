@@ -7,22 +7,36 @@
        模型学习从 IMU 6轴信号中检测 "是否击打" (二分类)
 
  数据流:
-   session 目录 (连续 IMU + 敲击时间戳)
-     → 逐帧生成二值标签 (hit_zone 内=1, 外=0)
-     → 滑动窗口切片 (窗口末尾帧标签 = 样本标签)
-     → 平衡正负样本 (背景:击打 ≤ 2:1)
-     → InceptionTime 训练
-     → EarlyStopping (valid_loss 10轮不降即停)
-     → 保存最佳模型 + 预处理参数
+   sliced_data/ → load_session_slices() → 平衡采样 → 训练 → 保存模型
+
+ ────────────────────────────────────────────────────────────────────────────
+ 参数:
+   --data_dir DIR        切片数据目录 (默认: sliced_data)
+   --model MODEL         模型架构: inception/fcn/lite/tst (默认: inception)
+   --epochs N            最大训练轮数 (默认: 50)
+   --bs N                批次大小 (默认: 64)
+   --lr LR               初始学习率 (默认: 5e-4)
+   --save_dir DIR        模型保存目录 (默认: models)
+   --focal-loss GAMMA    Focal Loss gamma, 0=标准CE (默认: 0)
+   --val-sessions S1,S2   验证集 session 名 (逗号分隔, 不参与训练)
+   --neg-sessions S1,S2   负样本 session 名 (背景采样时优先保留)
+   --aug-rotate DEG      IMU 旋转增强角度 (默认: 0, 建议 10-15)
+   --dropout P           Dropout 概率 (默认: 0.4)
+   --weight-decay WD     L2 权重衰减 (默认: 1e-3)
+   --no-augment          禁用数据增强
+   --balance-mode MODE   负例平衡: posthit/random (默认: posthit)
 
  用法:
-   D:/miniconda3/envs/drum/python.exe train_model.py --data_dir train_data
-   D:/miniconda3/envs/drum/python.exe train_model.py --data_dir train_data --model fcn
+   python train_model.py --data_dir sliced_data
+   python train_model.py --data_dir sliced_data --model fcn --epochs 100
+   python train_model.py --data_dir sliced_data --neg-sessions neg_a_0,neg_b_0 --no-augment
+   python train_model.py --data_dir sliced_data --val-sessions w_5,f_3 --aug-rotate 10
+   python train_model.py --data_dir sliced_data --balance-mode random --dropout 0.5
+   python train_model.py --data_dir sliced_data --focal-loss 2 --lr 1e-3
 
  参考:
    InceptionTime: Fawaz et al. (2020) https://arxiv.org/abs/1909.04939
    FCN: Wang et al. (2017) "Time Series Classification from Scratch"
-   python train_model.py --data_dir sliced_data  --neg-sessions shaking_0,shaking_1,with_hand,with_hand_1,with_hand_2
 """
 
 import os
@@ -255,7 +269,7 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
     if balance_mode == "random":
         return _balance_random(train_X, train_y, train_names, neg_set)
 
-    POST_HIT_FRAMES = 7  # 120ms @ 60Hz / 1帧stride ≈ 7帧
+    POST_HIT_FRAMES = 12  # 200ms @ 60Hz / 1帧stride ≈ 12帧
 
     total_hit = sum(int((y == 1).sum()) for y in train_y)
     total_bg = sum(int((y == 0).sum()) for y in train_y)
@@ -286,7 +300,7 @@ def _balance_dataset(train_X: list, train_y: list, train_names: list,
         post_hit_counts.append(int(mask.sum()))
 
     total_post_hit = sum(post_hit_counts)
-    print(f"\n  [平衡] 击打后120ms负例: {total_post_hit} (占全部bg的 {total_post_hit/total_bg*100:.1f}%)")
+    print(f"\n  [平衡] 击打后200ms负例: {total_post_hit} (占全部bg的 {total_post_hit/total_bg*100:.1f}%)")
 
     # Phase 2: 分配配额 — 先保留所有post-hit负例, 剩余按session均匀分
     # 如果post-hit已经超过总配额, 按比例下采样post-hit
@@ -484,7 +498,7 @@ def build_inception_time(dls, nf: int = 32, depth: int = 4,
     param_count = sum(p.numel() for p in model.parameters())
     print(f"  [模型] 定制 InceptionTime: ks={ks}, depth={depth}, nf={nf}")
     print(f"  [模型] 参数量: {param_count:,} (vs tsai默认 456K)")
-    print(f"  [模型] 池化: 指数加权 (末尾帧 ~4.5x)")
+    print(f"  [模型] 池化: 指数加权 (末尾帧 ~7.4x)")
     return model
 
 
@@ -619,7 +633,7 @@ def _imu_rotate_augment(X: np.ndarray, max_angle_deg: float = 15) -> np.ndarray:
 
 
 def train(X: np.ndarray, y: np.ndarray, model_name: str = "inception",
-          epochs: int = 70, batch_size: int = 64, lr: float = 5e-4,
+          epochs: int =50, batch_size: int = 64, lr: float = 5e-4,
           save_dir: str = "models", focal_gamma: float = 0,
           X_val: np.ndarray | None = None, y_val: np.ndarray | None = None,
           preproc_mean: np.ndarray | None = None,
@@ -863,7 +877,7 @@ def main():
                         choices=["inception", "fcn", "lite", "tst"],
                         help="模型架构: inception (推荐), fcn (快速baseline), "
                              "lite (极轻量), tst (Transformer对比)")
-    parser.add_argument("--epochs", type=int, default=70,
+    parser.add_argument("--epochs", type=int, default=50,
                         help="最大训练轮数 (早停机制会在 loss 不降时提前停止)")
     parser.add_argument("--bs", type=int, default=64,
                         help="批次大小 (显存不够可减小)")

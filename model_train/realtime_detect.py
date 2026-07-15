@@ -1,22 +1,53 @@
 """
-实时踩踏检测 — 从 ZigSim OSC 流实时预测
-========================================
+实时踩踏检测 — 从 ZigSim OSC 流实时预测 (模型模式)
+=====================================================
 接收 iPhone ZigSim 发送的 IMU 数据 (UDP :8888),
 用训练好的 InceptionTime 模型做滑动窗口实时预测。
 
 检测策略: 纯概率双阈值滞回
-  - 每帧推理 → P(hit) ∈ [0,1] (CE Loss 校准, 概率语义跨 session 一致)
+  - 每帧推理 → P(hit) ∈ [0,1]
   - P(hit) > --prob-high → 触发提示音 + 进入冷却
-  - P(hit) < --prob-low  → 释放滞回 (允许再次触发)
+  - P(hit) < --prob-low  → 释放滞回
   - 冷却期内不触发, 防止连击
 
-用法:
-  python realtime_detect.py
-  python realtime_detect.py --calibrate
-  python realtime_detect.py --prob-high 0.85 --prob-low 0.4 -v
-  python realtime_detect.py --cooldown 500
-  python realtime_detect.py --model model_judge/hit_detector_inception.pth --prob-high 0.85 --prob-low 0.4 --cooldown 200 --plot
+────────────────────────────────────────────────────────────────────────────
+ 模型模式参数:
+   --model PATH           模型 .pth 路径 (默认: models/hit_detector_inception.pth)
+   --port PORT            OSC UDP 端口 (默认: 8888)
+   --prob-high P          概率高阈值, 超过触发 (默认: 0.85)
+   --prob-low P           概率低阈值, 低于释放 (默认: 0.4)
+   --cooldown MS          冷却时间 ms (默认: 400)
+   --sound-wav WAV        触发音效文件 (默认: 1.wav)
+   --calibrate            校准模式: 采集背景数据, 建议阈值
+   --plot                 实时绘图: P(hit) 曲线 + 阈值线
+   --verbose, -v          单行动态刷新概率和状态
+   --debug                打印 OSC 原始数据
 
+ STA/LTA 简单模式参数 (--simple, 无需模型):
+   --simple               简单模式: STA/LTA 能量比检测
+   --ratio-thresh R       STA/LTA 触发比值 (默认: 3.0)
+   --mag-thresh G         mag 最低阈值 g (默认: 0.3)
+   --jerk-thresh J        jerk 快速通道阈值 g/帧 (默认: 0.5)
+
+ 用法:
+   # 默认参数
+   python realtime_detect.py
+
+   # 校准模式: 采集背景, 看概率分布, 选阈值
+   python realtime_detect.py --calibrate
+
+   # 调整阈值
+   python realtime_detect.py --prob-high 0.85 --prob-low 0.4 -v
+
+   # 加大冷却防连击
+   python realtime_detect.py --cooldown 600
+
+   # 指定模型 + 绘图
+   python realtime_detect.py --model models/test_v3/hit_detector_inception.pth --plot
+
+   # STA/LTA 模式
+   python realtime_detect.py --simple -v
+   python realtime_detect.py --simple --ratio-thresh 2.5 --plot
 """
 
 import sys

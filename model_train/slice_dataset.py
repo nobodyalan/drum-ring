@@ -7,34 +7,37 @@
  每个 session 独立保存，train_model.py 在训练时再决定 train/val 分割。
 
  标签策略 (实时预测方向):
-   - 每个 click 前后扩展为 hit_zone: [click - PRE_MS, click + POST_MS]
+   - 每个 Arduino click 通过峰值对齐找到 [click, click+100ms] 内 accel_mag 全局最大峰
+   - hit_zone = [peak - PRE_MS, peak + POST_MS]
    - 窗口末尾帧落在 hit_zone 内 → label = 1 (击打)
    - 窗口末尾帧落在 hit_zone 外 → label = 0 (背景)
-   - 窗口 [t-W, t] → 标签 = t 时刻状态 (推理时只见过往数据, 方向一致)
 
  数据流:
    session 目录 (连续 IMU + 敲击时间戳)
      → load_session() — t0 对齐
+     → refine_clicks_to_peaks() — 峰值对齐 [0, +100ms]
      → make_frame_labels() — 逐帧二值标签
      → slice_windows() — 滑动窗口切片 (C, T) 格式
      → 每个 session 独立保存为 {name}_X.npy + {name}_y.npy
      → 全量数据计算 preproc.npz (mean/std)
 
- 输出目录结构:
-   sliced_data/
-     sessions.txt          # 所有 session 名称列表
-     {name}_X.npy          # 每个 session 的窗口数据
-     {name}_y.npy          # 每个 session 的标签
-     preproc.npz           # 全量数据的 mean/std + 元信息
+ ────────────────────────────────────────────────────────────────────────────
+ 参数:
+   --data_dir DIR        原始 session 目录 (必须)
+   --save DIR            输出目录 (默认: sliced_data)
+   --pre MS              击打前扩展 ms (默认: 80)
+   --post MS             击打后扩展 ms (默认: 30)
+   --search-pre-ms MS    峰值搜索前向窗口 ms (默认: 0)
+   --search-post-ms MS   峰值搜索后向窗口 ms (默认: 100)
+   --no-refine           不做峰值对齐，直接用原始 Arduino 时间戳
+   --clean               切片前清空输出目录
 
  用法:
    python slice_dataset.py --data_dir train_data --save sliced_data
-   python slice_dataset.py --data_dir train_data --save sliced_data --pre 50 --post 200
-
- 训练 (可灵活调整验证集/负样本):
-   python train_model.py --data_dir sliced_data --save_dir models
-   python train_model.py --data_dir sliced_data --val-sessions w_5,f_3
-   python train_model.py --data_dir sliced_data --val-sessions w_5,f_3 --neg-sessions shaking_0,shaking_1
+   python slice_dataset.py --data_dir train_data --save sliced_data --pre 120 --post 30
+   python slice_dataset.py --data_dir train_data --save sliced_data --pre 150 --post -20  # 零延迟
+   python slice_dataset.py --data_dir train_data --save sliced_data --no-refine           # 旧行为
+   python slice_dataset.py --data_dir train_data --save sliced_data --search-post-ms 120 --clean
 """
 
 import os
@@ -45,7 +48,7 @@ import numpy as np
 # 一、切片参数
 # ============================================================================
 
-WINDOW_SEC = 0.117          # 窗口长度: 117ms (7帧, 适配160ms高速踩踏间隔)
+WINDOW_SEC = 0.250          # 窗口长度: 250ms (15帧 @60Hz)
 STRIDE_SEC = 0.033          # 滑动步长: ~33ms (训练用, 降低样本冗余)
 TARGET_FS = 60              # 手机 IMU 采样率 (ZigSim 60Hz)
 PRE_MS = 80                  # 击打前扩展: 80ms (预判零延迟)
@@ -152,6 +155,47 @@ def load_session(session_dir: str) -> dict | None:
 # 三、标签生成: 从敲击时刻生成逐帧二值标签
 # ============================================================================
 
+def refine_clicks_to_peaks(t_rel: np.ndarray, click_rel: np.ndarray,
+                            imu_data: np.ndarray,
+                            search_pre_ms: int = 0,
+                            search_post_ms: int = 100) -> np.ndarray:
+    """
+    将 Arduino 点击时间戳对齐到 [click, click+120ms] 内的加速度模长全局峰值。
+
+    理由: 真正的踩踏冲击峰总是在 Arduino 触发之后 0-120ms 内出现。
+    反弹峰在 150ms+ 之后, 被 120ms 窗口自然排除。
+    在这个窄窗内取全局最大是安全的。
+
+    返回 refined_clicks + 打印偏移统计.
+    """
+    if len(click_rel) == 0:
+        return click_rel.copy()
+
+    ax = imu_data[:, 3].astype(np.float64)
+    ay = imu_data[:, 4].astype(np.float64)
+    az = imu_data[:, 5].astype(np.float64)
+    accel_mag = np.sqrt(ax**2 + ay**2 + az**2)
+
+    refined = []
+    for c in click_rel:
+        # 用时间掩码精确控制搜索范围 (避免帧索引对齐误差)
+        mask = (t_rel >= c - search_pre_ms / 1000.0) & \
+               (t_rel <= c + search_post_ms / 1000.0)
+        if mask.any():
+            peak_offset = np.argmax(accel_mag[mask])
+            refined.append(t_rel[mask][peak_offset])
+        else:
+            refined.append(c)
+
+    refined = np.array(refined, dtype=click_rel.dtype)
+    shifts_ms = (refined - click_rel) * 1000
+    print(f"  [峰值对齐] 窗口 [0, +100ms] | "
+          f"偏移: mean={shifts_ms.mean():.0f}ms, std={shifts_ms.std():.0f}ms, "
+          f"min={shifts_ms.min():.0f}ms, max={shifts_ms.max():.0f}ms")
+
+    return refined
+
+
 def make_frame_labels(t_rel: np.ndarray, click_rel: np.ndarray) -> np.ndarray:
     """hit_zone = [click - PRE_MS, click + POST_MS], 重叠区域保持 1."""
     y = np.zeros(len(t_rel), dtype=np.float32)
@@ -206,7 +250,10 @@ def save_preproc_stats(X_all: np.ndarray, save_dir: str):
     return mean, std
 
 
-def process_sessions(data_dir: str, save_dir: str):
+def process_sessions(data_dir: str, save_dir: str,
+                     no_refine: bool = False,
+                     search_pre_ms: int = 50,
+                     search_post_ms: int = 200):
     """扫描所有 session, 逐个切片并独立保存。返回 session 名称列表。"""
     session_dirs = sorted(
         [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
@@ -227,7 +274,13 @@ def process_sessions(data_dir: str, save_dir: str):
         if s is None:
             continue
 
-        y_frame = make_frame_labels(s["t_rel"], s["click_rel"])
+        if not no_refine:
+            refined_clicks = refine_clicks_to_peaks(
+                s["t_rel"], s["click_rel"], s["imu"],
+                search_pre_ms, search_post_ms)
+        else:
+            refined_clicks = s["click_rel"]
+        y_frame = make_frame_labels(s["t_rel"], refined_clicks)
         X, y = slice_windows(s["imu"], y_frame)
 
         nhit = int(y.sum())
@@ -296,6 +349,12 @@ def main():
                         help="击打前扩展 ms (默认: 80ms)")
     parser.add_argument("--post", type=int, default=30,
                         help="击打后扩展 ms (默认: 30ms)")
+    parser.add_argument("--search-pre-ms", type=int, default=0,
+                        help="峰值搜索窗口前向 ms (默认: 0)")
+    parser.add_argument("--search-post-ms", type=int, default=100,
+                        help="峰值搜索窗口后向 ms (默认: 100)")
+    parser.add_argument("--no-refine", action="store_true",
+                        help="不做峰值对齐，直接用原始 Arduino 时间戳")
     parser.add_argument("--clean", action="store_true",
                         help="切片前清空输出目录 (默认: 增量添加/覆盖)")
 
@@ -315,10 +374,14 @@ def main():
     print(f"  窗口: {WINDOW_SEC*1000:.0f}ms ({WINDOW_FRAMES} 帧 @{TARGET_FS}Hz)")
     print(f"  步长: {STRIDE_SEC*1000:.0f}ms ({STRIDE_FRAMES} 帧)")
     print(f"  击打区: [-{PRE_MS}ms, +{POST_MS}ms]")
+    print(f"  峰值对齐: {'关闭 (--no-refine)' if args.no_refine else f'开启 (前{args.search_pre_ms}ms / 后{args.search_post_ms}ms)'}")
     print(f"  标签: 二值 (0=背景, 1=击打)")
     print("=" * 55)
 
-    session_names = process_sessions(args.data_dir, args.save)
+    session_names = process_sessions(args.data_dir, args.save,
+                                      no_refine=args.no_refine,
+                                      search_pre_ms=args.search_pre_ms,
+                                      search_post_ms=args.search_post_ms)
 
     if not session_names:
         print("  [X] 未找到任何训练数据!")
