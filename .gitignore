@@ -220,23 +220,13 @@ tmp*/
 # ========================
 
 # 训练数据 (.npy 二进制大文件)
-*.npy
 *.npy.bak
 
 # 模型权重
-*.pth
 
 # MACOSX 垃圾文件
 __MACOSX/
 
-# 模型输出目录
-model_train/models/
-model_train/models_*/
-
-# 训练数据目录
-model_train/train_data/
-model_train/new_data/
-model_train/sliced_data/
 
 # CoreML CI 生成产物 (本地开发时为空)
 ios_develop/Generated/*
