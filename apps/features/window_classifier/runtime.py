@@ -226,6 +226,165 @@ class ProbabilityChart(QWidget):
         painter.end()
 
 
+class ProbabilityTimelineChart(QWidget):
+    """Rolling time-series line chart showing per-class probability history."""
+
+    def __init__(
+        self,
+        *,
+        class_ids: tuple[int, ...],
+        class_labels: dict[int, str],
+        class_colors: dict[int, QColor],
+        history_seconds: float = 10.0,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.class_ids = tuple(class_ids)
+        self.class_labels = dict(class_labels)
+        self.class_colors = dict(class_colors)
+        self.history_seconds = max(1.0, float(history_seconds))
+        self._history: deque[tuple[float, tuple[float, ...]]] = deque()
+        self._start_time: float | None = None
+        self.setMinimumHeight(200)
+
+    def clear(self) -> None:
+        self._history.clear()
+        self._start_time = None
+        self.update()
+
+    def set_probabilities(
+        self,
+        probabilities: list[float] | tuple[float, ...] | np.ndarray,
+    ) -> None:
+        values = tuple(float(v) for v in np.asarray(probabilities, dtype=np.float32).flat)
+        if len(values) != len(self.class_ids):
+            return
+        now = time.perf_counter()
+        if self._start_time is None:
+            self._start_time = now
+        elapsed = now - self._start_time
+        self._history.append((elapsed, values))
+        cutoff = elapsed - self.history_seconds
+        while self._history and self._history[0][0] < cutoff:
+            self._history.popleft()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        _ = event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect().adjusted(8, 4, -8, -4)
+        margin_left = 44
+        margin_right = 12
+        margin_top = 10
+        margin_bottom = 28
+
+        plot_rect = rect.adjusted(margin_left, margin_top, -margin_right, -margin_bottom)
+        painter.fillRect(rect, QColor("#FBFCFE"))
+        painter.fillRect(plot_rect, QColor("#F7F9FC"))
+
+        # ── horizontal grid ──
+        painter.setPen(QPen(QColor("#DCE5EE"), 1, Qt.PenStyle.DotLine))
+        for level in range(5):
+            ratio = level / 4.0
+            y = int(plot_rect.bottom() - ratio * plot_rect.height())
+            painter.drawLine(int(plot_rect.left()), y, int(plot_rect.right()), y)
+
+        # ── Y-axis labels ──
+        painter.setPen(QColor("#7F90A4"))
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        for level in range(5):
+            ratio = level / 4.0
+            y = int(plot_rect.bottom() - ratio * plot_rect.height())
+            painter.drawText(
+                int(rect.left()), y - 7, margin_left - 6, 14,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                f"{int(ratio * 100)}%",
+            )
+
+        # ── X-axis labels ──
+        if self._history:
+            t_min = self._history[0][0]
+            t_max = self._history[-1][0]
+            duration = max(t_max - t_min, 0.5)
+            if duration <= 2:
+                tick_interval = 0.5
+            elif duration <= 5:
+                tick_interval = 1.0
+            elif duration <= 15:
+                tick_interval = 2.0
+            else:
+                tick_interval = 5.0
+            tick = int(t_min / tick_interval) * tick_interval
+            while tick <= t_max + tick_interval * 0.01:
+                x = int(plot_rect.left() + (tick - t_min) / max(duration, 0.001) * plot_rect.width())
+                if plot_rect.left() <= x <= plot_rect.right():
+                    painter.setPen(QPen(QColor("#DCE5EE"), 1, Qt.PenStyle.DotLine))
+                    painter.drawLine(x, int(plot_rect.top()), x, int(plot_rect.bottom()))
+                    painter.setPen(QColor("#7F90A4"))
+                    painter.drawText(x - 30, int(plot_rect.bottom()) + 2, 60, 18,
+                                     Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop,
+                                     f"{tick:.1f}s" if tick_interval < 1.0 else f"{int(tick)}s")
+                tick += tick_interval
+
+        # ── plot border ──
+        painter.setPen(QPen(QColor("#D0D8E2"), 1))
+        painter.drawRect(plot_rect)
+
+        # ── draw lines ──
+        if len(self._history) >= 2:
+            t_min = self._history[0][0]
+            t_max = self._history[-1][0]
+            time_span = max(t_max - t_min, 0.001)
+            painter.save()
+            painter.setClipRect(plot_rect)
+            for idx, class_id in reversed(list(enumerate(self.class_ids))):
+                color = self.class_colors.get(class_id, QColor("#888888"))
+                lw = 2.0 if class_id != 0 else 1.2
+                alpha = 220 if class_id != 0 else 140
+                c = QColor(color)
+                c.setAlpha(alpha)
+                painter.setPen(QPen(c, lw))
+                points = []
+                for elapsed, probs in self._history:
+                    x = int(plot_rect.left() + (elapsed - t_min) / time_span * plot_rect.width())
+                    y = int(plot_rect.bottom() - probs[idx] * plot_rect.height())
+                    points.append((x, y))
+                for i in range(len(points) - 1):
+                    painter.drawLine(points[i][0], points[i][1],
+                                     points[i + 1][0], points[i + 1][1])
+            painter.restore()
+
+        # ── legend ──
+        legend_y = int(plot_rect.top()) + 6
+        for idx, class_id in reversed(list(enumerate(self.class_ids))):
+            color = self.class_colors.get(class_id, QColor("#888888"))
+            ly = legend_y + idx * 16
+            if ly > plot_rect.bottom() - 10:
+                break
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            sw = int(plot_rect.right()) - len(self.class_ids) * 72 + idx * 72
+            painter.drawRoundedRect(sw, ly, 10, 10, 2, 2)
+            painter.setPen(QColor("#44576A"))
+            painter.drawText(sw + 14, ly - 1, 56, 12,
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             f"{class_id}:{self.class_labels.get(class_id, str(class_id))}")
+
+        # ── title ──
+        font.setPointSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor("#7F90A4"))
+        painter.drawText(int(plot_rect.left()), int(rect.top()),
+                         plot_rect.width(), 16,
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                         "Probability Timeline")
+        painter.end()
+
+
 class WindowClassifierWorker(QThread):
     """Runs model inference off the UI thread; app windows only submit windows and render results."""
 

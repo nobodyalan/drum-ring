@@ -15,6 +15,7 @@ class AppLaunchSpec:
 APP_LAUNCH_SPECS: tuple[AppLaunchSpec, ...] = (
     AppLaunchSpec("demo", "示范应用", "apps/demo_processor_app.py", "apps.demo_processor_app"),
     AppLaunchSpec("imu_visualizer", "IMU 可视化", "apps/imu_visualizer_app.py", "apps.imu_visualizer_app"),
+    AppLaunchSpec("imu_realtime", "IMU 实时 (matplotlib)", "scripts/visualize_imu_realtime.py", "scripts.visualize_imu_realtime"),
     AppLaunchSpec(
         "pressure_imu_visualizer",
         "压力+IMU",

@@ -64,10 +64,22 @@ def _wrap(data: bytes, *, original_name: str, seed: Optional[str] = None) -> byt
 
 def _unwrap(blob: bytes, *, seed: Optional[str] = None) -> tuple[bytes, str]:
     mark = _stamp()
-    if not blob.startswith(mark):
+    # 兼容 CRLF 变体 (某些录制文件使用 \r\n 换行)
+    candidates = [mark]
+    if mark.endswith(b"\n"):
+        candidates.append(mark[:-1] + b"\r\n")
+    elif mark.endswith(b"\r\n"):
+        candidates.append(mark[:-2] + b"\n")
+
+    matched = None
+    for candidate in candidates:
+        if blob.startswith(candidate):
+            matched = candidate
+            break
+    if matched is None:
         raise ValueError("文件格式不正确")
 
-    payload = json.loads(blob[len(mark) :].decode("utf-8"))
+    payload = json.loads(blob[len(matched) :].decode("utf-8"))
     salt = base64.b64decode(payload["salt"])
     token = str(payload["blob"]).encode("ascii")
     lane = _shape(_phrase() if seed is None else seed, salt, payload["rounds"])

@@ -320,6 +320,21 @@ class RecorderWindow(RingStreamWindowBase):
         stream_row.addStretch()
         panel_layout.addLayout(stream_row)
 
+        # ── 纯负例模式 ──
+        neg_row = QHBoxLayout()
+        self.chk_negative = QCheckBox("纯负例模式 (无需 Arduino, 全程无手势)")
+        self.chk_negative.setProperty("class", "btn-danger")
+        self.chk_negative.toggled.connect(self._on_negative_mode_toggled)
+        self.neg_user_input = QLineEdit()
+        self.neg_user_input.setPlaceholderText("录制人 (如 whr)")
+        self.neg_user_input.setMaximumWidth(120)
+        self.neg_user_input.setEnabled(False)
+        neg_row.addWidget(self.chk_negative)
+        neg_row.addWidget(QLabel("用户:"))
+        neg_row.addWidget(self.neg_user_input)
+        neg_row.addStretch()
+        panel_layout.addLayout(neg_row)
+
         serial_row = QHBoxLayout()
         self.serial_combo = QComboBox()
         self.serial_combo.setMinimumWidth(300)
@@ -395,6 +410,18 @@ class RecorderWindow(RingStreamWindowBase):
 
         self.bind_stream_client_signals()
 
+    def _on_negative_mode_toggled(self, checked: bool) -> None:
+        if checked:
+            self.chk_serial.setChecked(False)
+            self.chk_serial.setEnabled(False)
+            self.chk_audio.setChecked(False)
+            self.chk_audio.setEnabled(False)
+            self.neg_user_input.setEnabled(True)
+        else:
+            self.chk_serial.setEnabled(True)
+            self.chk_audio.setEnabled(True)
+            self.neg_user_input.setEnabled(False)
+
     def on_stream_connected(self) -> None:
         self.send_subscription(["imu"], empty_behavior="none")
 
@@ -421,6 +448,11 @@ class RecorderWindow(RingStreamWindowBase):
         if not streams and not self.chk_serial.isChecked():
             self.metric_label.setText("请至少选择一种录制数据（IMU、音频或串口）")
             return
+        if self.chk_negative.isChecked():
+            if not self.neg_user_input.text().strip():
+                self.metric_label.setText("纯负例模式需要填写录制人")
+                return
+            self.chk_serial.setChecked(False)
         if self.chk_serial.isChecked() and not self.serial.isOpen():
             self.metric_label.setText("录制串口前请先连接 Arduino 串口")
             return
@@ -701,6 +733,9 @@ class RecorderWindow(RingStreamWindowBase):
         return count
 
     def _recording_suffix(self, start_ts: int) -> str:
+        if self.chk_negative.isChecked():
+            user = self._safe_name(self.neg_user_input.text().strip() or "unknown")
+            return f"{start_ts}_{user}_0"
         raw_tag = self.name_input.text().strip()
         if not raw_tag:
             return str(start_ts)

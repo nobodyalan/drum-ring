@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtMultimedia import QSoundEffect
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
+    QCheckBox,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
@@ -26,7 +27,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from apps.features.window_classifier.runtime import ProbabilityChart, RateTracker
+import matplotlib
+matplotlib.use("Agg")
+
+from apps.features.window_classifier.runtime import (
+    ProbabilityChart,
+    ProbabilityTimelineChart,
+    RateTracker,
+)
 from apps.framework.bootstrap import create_base_parser, run_window
 from apps.framework.stream_window import RingStreamWindowBase
 from apps.framework.ui_style import APP_STYLE_SHEET
@@ -46,6 +54,30 @@ DEFAULT_MODEL_PATH = (
     / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth"
 )
 MODEL_OPTIONS = [
+    (
+        "lead6,4,2,0,-3 + transition neg (99.7%)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_lead63_transition.pth",
+        15,
+    ),
+    (
+        "BCL60371EA Full v2 w15 (99.6%)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_bcl60371ea_full_v2_w15_rawlin12hc.pth",
+        15,
+    ),
+    (
+        "lead10,8,6,4 + transition neg (97.9%)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_lead10864_transition.pth",
+        15,
+    ),
     (
         "w20 lead6,4,2",
         PROJECT_ROOT
@@ -126,6 +158,30 @@ MODEL_OPTIONS = [
         / "local_drum_all_plus_latest_w10_lead22201816_rawlin12hc_balanced_random.pth",
         10,
     ),
+    (
+        "w15-no_weighted-no_switch-18,16,14,12",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_full_21ch_weighted.pth",
+        15,
+    ),
+    (
+        "w15-no_weighted-switch-18,16,14,12",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_full_21ch_switch.pth",
+        15,
+    ),
+    (
+        "w15-weighted-switch-18,16,14,12",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_full_21ch_switch-weighted.pth",
+        15,
+    ),
 ]
 SOUND_DIR = PROJECT_ROOT / "assets" / "drum_gesture" / "sounds"
 IMU_SAMPLE_RATE_HZ = 200.0
@@ -137,13 +193,29 @@ DRUM_CLASS_COLORS = {
     2: QColor("#61DDAA"),
     3: QColor("#F6BD16"),
     4: QColor("#E8684A"),
+    5: QColor("#8B5CF6"),
 }
 DRUM_SOUND_FILES = {
     1: SOUND_DIR / "gesture_1_closed_hat.wav",
     2: SOUND_DIR / "gesture_2_tom2.wav",
     3: SOUND_DIR / "gesture_3_snare.wav",
     4: SOUND_DIR / "gesture_4_tom1.wav",
+    5: SOUND_DIR / "gesture_5_kick.wav",
 }
+
+# ── 脚部踩踏检测默认参数 ──
+FOOT_MODEL_PATH = (
+    PROJECT_ROOT
+    / "model_train"
+    / "models"
+    / "test_model_nodelay_final"
+    / "hit_detector_inception.pth"
+)
+FOOT_OSC_PORT = 8888
+FOOT_PROB_HIGH = 0.85
+FOOT_PROB_LOW = 0.40
+FOOT_COOLDOWN_MS = 400
+FOOT_CLASS_ID = 5
 
 
 @dataclass(frozen=True)
@@ -232,6 +304,218 @@ class DrumInferenceWorker(QThread):
             )
 
 
+class FootDetectWorker(QThread):
+    """后台线程: UDP OSC 监听 + 脚部踩踏模型推理 (双阈值滞回)."""
+
+    foot_hit_detected = pyqtSignal(float)
+    foot_status_updated = pyqtSignal(str)
+    foot_error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        model_path: Path,
+        osc_port: int = 8888,
+        prob_high: float = 0.85,
+        prob_low: float = 0.40,
+        cooldown_ms: int = 400,
+    ):
+        super().__init__()
+        self._model_path = Path(model_path)
+        self._osc_port = int(osc_port)
+        self._prob_high = float(prob_high)
+        self._prob_low = float(prob_low)
+        self._cooldown_ms = int(cooldown_ms)
+        self._stopping = False
+
+    def stop(self) -> None:
+        self._stopping = True
+        self.wait(3000)
+
+    def run(self) -> None:
+        import sys
+        import traceback
+        from pathlib import Path as _Path
+
+        _project_root = _Path(__file__).resolve().parents[1]
+        if str(_project_root) not in sys.path:
+            sys.path.insert(0, str(_project_root))
+
+        try:
+            self._run_impl(_project_root)
+        except Exception as exc:
+            tb = traceback.format_exc()
+            print(f"[FootDetectWorker] 未捕获异常:\n{tb}", flush=True)
+            self.foot_error.emit(f"内部错误: {exc}")
+
+    def _run_impl(self, _project_root) -> None:
+        import sys
+        import socket
+        import threading as _threading
+        import time as _time
+
+        # ── 1. 导入检测模块 ──
+        # realtime_detect.py 在模块级调用 matplotlib.use('TkAgg'),
+        # 但 PyQt6 已占用 qt 框架, matplotlib 会拒绝切换并抛出异常.
+        # 这里把 matplotlib.use 临时替换为空操作, 绕过冲突.
+        print("[FootDetectWorker] 导入 realtime_detect 模块...", flush=True)
+        import matplotlib as _mpl
+        _mpl_use = _mpl.use
+        _mpl.use = lambda *a, **kw: None
+        try:
+            from model_train.realtime_detect import (
+                RealtimeDetector,
+                load_model as _load_model,
+                parse_osc_bundle,
+            )
+        except Exception as exc:
+            print(f"[FootDetectWorker] 导入失败: {exc}", flush=True)
+            self.foot_error.emit(f"导入脚部检测模块失败: {exc}")
+            return
+        finally:
+            _mpl.use = _mpl_use
+        print("[FootDetectWorker] 导入成功", flush=True)
+
+        # ── 2. 加载模型 ──
+        print(f"[FootDetectWorker] 加载模型: {self._model_path}", flush=True)
+        try:
+            model, mean, std, window_frames = _load_model(str(self._model_path))
+        except Exception as exc:
+            print(f"[FootDetectWorker] 模型加载失败: {exc}", flush=True)
+            self.foot_error.emit(f"脚部模型加载失败: {exc}")
+            return
+        print(f"[FootDetectWorker] 模型加载成功 window_frames={window_frames} channels={len(mean)}", flush=True)
+
+        self.foot_status_updated.emit(f"模型已加载 (窗={window_frames}帧), 启动 OSC 监听...")
+
+        # ── 3. 创建检测器 ──
+        detector = RealtimeDetector(
+            model=model,
+            mean=mean,
+            std=std,
+            window_frames=window_frames,
+            prob_high=self._prob_high,
+            prob_low=self._prob_low,
+            cooldown_ms=self._cooldown_ms,
+        )
+
+        # ── 4. OSC 监听线程 ──
+        osc_socket = None
+        osc_stop = False
+        osc_bound = False
+
+        def osc_listener() -> None:
+            nonlocal osc_socket, osc_stop, osc_bound
+            try:
+                osc_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                osc_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                osc_socket.settimeout(0.1)
+                osc_socket.bind(("0.0.0.0", self._osc_port))
+                osc_bound = True
+                print(f"[FootDetectWorker] OSC 监听已绑定端口 {self._osc_port}", flush=True)
+                self.foot_status_updated.emit(f"OSC 端口 {self._osc_port} 已绑定，等待数据...")
+            except OSError as exc:
+                print(f"[FootDetectWorker] OSC 端口 {self._osc_port} 绑定失败: {exc}", flush=True)
+                self.foot_error.emit(f"OSC 端口 {self._osc_port} 绑定失败: {exc}")
+                detector.running = False
+                return
+
+            while not osc_stop and detector.running:
+                try:
+                    data, _addr = osc_socket.recvfrom(65536)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    frame = parse_osc_bundle(data)
+                except Exception:
+                    continue
+                if len(frame) >= 6:
+                    detector.add_imu_frame(*frame)
+
+            if osc_socket is not None:
+                try:
+                    osc_socket.close()
+                except OSError:
+                    pass
+
+        osc_thread = _threading.Thread(target=osc_listener, daemon=True)
+        osc_thread.start()
+
+        # 等待 OSC 绑定完成 (最多 2 秒)
+        _time.sleep(0.3)
+        if not osc_bound and not self._stopping:
+            # osc_listener 在绑定失败时会 emit foot_error 并设置 detector.running=False
+            if not detector.running:
+                return
+
+        # ── 5. 主检测循环 ──
+        print("[FootDetectWorker] 进入检测循环", flush=True)
+        last_frame_count = 0
+        last_buffer_report = _time.time()
+        try:
+            while not self._stopping and detector.running:
+                _time.sleep(0.001)
+
+                with detector.lock:
+                    cur_count = detector.frame_count
+                    buf_len = len(detector.buffer)
+
+                if buf_len < detector.window_frames:
+                    # 每秒报告一次缓冲状态
+                    now = _time.time()
+                    if now - last_buffer_report > 2.0:
+                        last_buffer_report = now
+                        if cur_count == 0:
+                            self.foot_status_updated.emit(
+                                f"等待 OSC 数据... (缓冲 {buf_len}/{detector.window_frames} 帧)"
+                            )
+                        else:
+                            self.foot_status_updated.emit(
+                                f"缓冲中... {buf_len}/{detector.window_frames} 帧"
+                            )
+                    continue
+
+                if cur_count == last_frame_count:
+                    continue
+                last_frame_count = cur_count
+
+                try:
+                    prob = detector.predict()
+                except Exception:
+                    continue
+
+                detector.total_frames += 1
+
+                now = _time.time()
+                in_cooldown = (now - detector.last_trigger_time) < detector.cooldown_s
+
+                if prob > detector.prob_high:
+                    if not in_cooldown:
+                        self.foot_hit_detected.emit(prob)
+                        detector.last_trigger_time = now
+                        if not detector.armed:
+                            detector.armed = True
+                            detector.total_triggers += 1
+                            print(f"[FootDetectWorker] 检测到踩踏! P={prob:.3f} #{detector.total_triggers}", flush=True)
+                elif prob < detector.prob_low:
+                    detector.armed = False
+
+                if detector.total_frames % 60 == 0:
+                    cooldown_left = max(0.0, detector.cooldown_s - (now - detector.last_trigger_time))
+                    cd_str = f"CD{cooldown_left:.1f}s" if cooldown_left > 0.01 else "ready"
+                    state_str = "ARMED" if detector.armed else "idle"
+                    self.foot_status_updated.emit(
+                        f"帧={detector.total_frames} | P={prob:.3f} | {state_str} | {cd_str} | trig={detector.total_triggers}"
+                    )
+        finally:
+            detector.running = False
+            osc_stop = True
+            osc_thread.join(timeout=1.0)
+            print("[FootDetectWorker] 检测循环已退出", flush=True)
+            self.foot_status_updated.emit("已停止")
+
+
 @dataclass
 class DrumRingState:
     ring_name: str
@@ -248,6 +532,8 @@ class DrumRingState:
 
 
 class DrumGestureWindow(RingStreamWindowBase):
+    probability_changed = pyqtSignal(tuple)
+
     def __init__(self, host: str, port: int, model_path: Path):
         super().__init__(host=host, port=port)
         self.setWindowTitle("Drum Gesture 实时识别")
@@ -263,6 +549,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.in_flight_addresses: set[str] = set()
         self.sound_effects: dict[int, list[QSoundEffect]] = {}
         self.sound_voice_indices: dict[int, int] = {}
+        self.timeline_window: ProbabilityTimelineWindow | None = None
 
         self.stream_status_label = QLabel("数据流状态：未连接")
         self.stream_status_label.setObjectName("statusTag")
@@ -301,7 +588,7 @@ class DrumGestureWindow(RingStreamWindowBase):
 
         self.step_input = QSpinBox()
         self.step_input.setRange(1, 20)
-        self.step_input.setValue(5)
+        self.step_input.setValue(4)
         self.step_input.setSuffix(" 帧")
         self.step_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
 
@@ -309,7 +596,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.stable_window_input.setRange(0.02, 0.50)
         self.stable_window_input.setDecimals(2)
         self.stable_window_input.setSingleStep(0.01)
-        self.stable_window_input.setValue(0.04)
+        self.stable_window_input.setValue(0.02)
         self.stable_window_input.setSuffix(" s")
         self.stable_window_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
 
@@ -327,6 +614,32 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.volume_input.setValue(0.80)
         self.volume_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.volume_input.valueChanged.connect(self.on_volume_changed)
+
+        # ── 脚部踩踏检测控件 ──
+        self.foot_enable_checkbox = QCheckBox("启用脚部踩踏检测 (OSC)")
+        self.foot_prob_high_input = QDoubleSpinBox()
+        self.foot_prob_high_input.setRange(0.50, 0.99)
+        self.foot_prob_high_input.setDecimals(2)
+        self.foot_prob_high_input.setSingleStep(0.05)
+        self.foot_prob_high_input.setValue(FOOT_PROB_HIGH)
+        self.foot_prob_high_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+        self.foot_prob_low_input = QDoubleSpinBox()
+        self.foot_prob_low_input.setRange(0.10, 0.80)
+        self.foot_prob_low_input.setDecimals(2)
+        self.foot_prob_low_input.setSingleStep(0.05)
+        self.foot_prob_low_input.setValue(FOOT_PROB_LOW)
+        self.foot_prob_low_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+        self.foot_cooldown_input = QSpinBox()
+        self.foot_cooldown_input.setRange(100, 2000)
+        self.foot_cooldown_input.setSingleStep(50)
+        self.foot_cooldown_input.setValue(FOOT_COOLDOWN_MS)
+        self.foot_cooldown_input.setSuffix(" ms")
+        self.foot_cooldown_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+        self.foot_status_label = QLabel("脚部检测：未启用")
+        self.foot_worker: FootDetectWorker | None = None
 
         self.load_sound_effects()
         self._build_ui()
@@ -367,6 +680,7 @@ class DrumGestureWindow(RingStreamWindowBase):
             self.buffer_label,
             self.fps_label,
             self.peak_label,
+            self.foot_status_label,
         ):
             panel_layout.addWidget(widget)
 
@@ -396,6 +710,18 @@ class DrumGestureWindow(RingStreamWindowBase):
         settings.addWidget(self.trigger_ratio_input, 3, 1)
         settings.addWidget(QLabel("音量"), 3, 2)
         settings.addWidget(self.volume_input, 3, 3)
+
+        # ── 脚部检测参数行 ──
+        settings.addWidget(QLabel("脚部检测"), 4, 0)
+        settings.addWidget(self.foot_enable_checkbox, 4, 1)
+        settings.addWidget(QLabel("触发阈值"), 4, 2)
+        settings.addWidget(self.foot_prob_high_input, 4, 3)
+
+        settings.addWidget(QLabel("释放阈值"), 5, 0)
+        settings.addWidget(self.foot_prob_low_input, 5, 1)
+        settings.addWidget(QLabel("冷却(ms)"), 5, 2)
+        settings.addWidget(self.foot_cooldown_input, 5, 3)
+
         panel_layout.addWidget(settings_panel)
 
         action_row = QHBoxLayout()
@@ -404,8 +730,11 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.apply_btn.setProperty("class", "btn-primary")
         self.clear_btn = QPushButton("清空结果")
         self.clear_btn.setProperty("class", "btn-gray")
+        self.timeline_btn = QPushButton("打开概率曲线")
+        self.timeline_btn.setProperty("class", "btn-gray")
         action_row.addWidget(self.apply_btn)
         action_row.addWidget(self.clear_btn)
+        action_row.addWidget(self.timeline_btn)
         action_row.addStretch()
         panel_layout.addLayout(action_row)
 
@@ -434,7 +763,9 @@ class DrumGestureWindow(RingStreamWindowBase):
     def _bind_signals(self) -> None:
         self.apply_btn.clicked.connect(self.apply_subscription)
         self.clear_btn.clicked.connect(self.clear_results)
+        self.timeline_btn.clicked.connect(self.open_timeline_window)
         self.model_select.currentIndexChanged.connect(self.on_model_selected)
+        self.foot_enable_checkbox.toggled.connect(self.on_foot_detection_toggled)
         self.bind_stream_client_signals()
 
     def on_stream_connected(self) -> None:
@@ -545,6 +876,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         state.rate_tracker.mark()
         prediction = result.prediction
         self.chart.set_probabilities(prediction.probabilities)
+        self.probability_changed.emit(prediction.probabilities)
         self.result_label.setText(f"{prediction.class_id} · {prediction.label}")
         self.peak_label.setText(
             f"窗口峰值：{result.window_peak_norm:.1f} | window end sample {result.window_end_sample_index}"
@@ -645,6 +977,25 @@ class DrumGestureWindow(RingStreamWindowBase):
         self.peak_label.setText("最近峰值：-")
         self.set_runtime_status("状态：结果已清空，等待 IMU 数据")
 
+    def open_timeline_window(self) -> None:
+        if self.timeline_window is not None and self.timeline_window.isVisible():
+            self.timeline_window.raise_()
+            self.timeline_window.activateWindow()
+            return
+        self.timeline_window = ProbabilityTimelineWindow(
+            class_ids=DRUM_CLASS_IDS,
+            class_labels=DRUM_CLASS_LABELS,
+            class_colors=DRUM_CLASS_COLORS,
+        )
+        self.probability_changed.connect(self.timeline_window.update_probabilities)
+        self.timeline_window.destroyed.connect(self._on_timeline_window_closed)
+        self.timeline_window.show()
+
+    def _on_timeline_window_closed(self) -> None:
+        if self.timeline_window is not None:
+            self.probability_changed.disconnect(self.timeline_window.update_probabilities)
+            self.timeline_window = None
+
     def start_worker(self) -> None:
         self.runtime_ready = False
         self.runtime_failed = False
@@ -729,6 +1080,54 @@ class DrumGestureWindow(RingStreamWindowBase):
             effect.stop()
         effect.play()
 
+    # ── 脚部踩踏检测 ──
+
+    def on_foot_detection_toggled(self, enabled: bool) -> None:
+        if enabled:
+            self.start_foot_worker()
+        else:
+            self.stop_foot_worker()
+
+    def start_foot_worker(self) -> None:
+        if self.foot_worker is not None:
+            self.stop_foot_worker()
+
+        model_path = Path(str(FOOT_MODEL_PATH)).expanduser().resolve()
+        if not model_path.exists():
+            self.foot_status_label.setText(f"脚部检测：模型文件不存在 {model_path}")
+            self.foot_enable_checkbox.setChecked(False)
+            return
+
+        self.foot_worker = FootDetectWorker(
+            model_path=model_path,
+            osc_port=FOOT_OSC_PORT,
+            prob_high=float(self.foot_prob_high_input.value()),
+            prob_low=float(self.foot_prob_low_input.value()),
+            cooldown_ms=int(self.foot_cooldown_input.value()),
+        )
+        self.foot_worker.foot_hit_detected.connect(self.on_foot_hit)
+        self.foot_worker.foot_status_updated.connect(self.on_foot_status)
+        self.foot_worker.foot_error.connect(self.on_foot_error)
+        self.foot_worker.start()
+        self.foot_status_label.setText("脚部检测：启动中，等待 OSC 数据...")
+
+    def stop_foot_worker(self) -> None:
+        if self.foot_worker is not None:
+            self.foot_worker.stop()
+            self.foot_worker = None
+        self.foot_status_label.setText("脚部检测：未启用")
+
+    def on_foot_hit(self, prob: float) -> None:
+        self.play_gesture_sound(FOOT_CLASS_ID)
+
+    def on_foot_status(self, status: str) -> None:
+        self.foot_status_label.setText(f"脚部检测：{status}")
+
+    def on_foot_error(self, error: str) -> None:
+        print(f"[DrumGestureWindow] 脚部检测错误: {error}", flush=True)
+        self.foot_status_label.setText(f"⚠ 脚部错误：{error}")
+        self.foot_enable_checkbox.setChecked(False)
+
     def on_rings_updated(
         self,
         *,
@@ -808,9 +1207,50 @@ class DrumGestureWindow(RingStreamWindowBase):
 
     def closeEvent(self, event) -> None:
         self.stop_worker()
+        self.stop_foot_worker()
+        if self.timeline_window is not None:
+            self.timeline_window.close()
+            self.timeline_window = None
         self.client.stop()
         self.client.wait(1500)
         event.accept()
+
+
+class ProbabilityTimelineWindow(QWidget):
+    """Standalone floating window showing 5-class probability history over time."""
+
+    def __init__(
+        self,
+        *,
+        class_ids: tuple[int, ...],
+        class_labels: dict[int, str],
+        class_colors: dict[int, QColor],
+    ):
+        super().__init__()
+        self.setWindowTitle("5 分类概率时间曲线")
+        self.resize(900, 420)
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        self._chart = ProbabilityTimelineChart(
+            class_ids=class_ids,
+            class_labels=class_labels,
+            class_colors=class_colors,
+            history_seconds=10.0,
+        )
+        layout.addWidget(self._chart)
+
+    def update_probabilities(
+        self,
+        probabilities: list[float] | tuple[float, ...],
+    ) -> None:
+        self._chart.set_probabilities(probabilities)
+
+    def clear_chart(self) -> None:
+        self._chart.clear()
 
 
 def create_parser() -> argparse.ArgumentParser:

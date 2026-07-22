@@ -14,10 +14,10 @@ DEFAULT_CHECKPOINT_PATH = (
     PROJECT_ROOT
     / "checkpoint"
     / "drum_gesture"
-    / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth"
+    / "local_drum_lead63_transition.pth"
 )
 
-WINDOW_SIZE = 20
+WINDOW_SIZE = 15
 PRE_PEAK_FRAMES = 12
 POST_PEAK_FRAMES = 2
 GRAVITY = 9.81
@@ -33,24 +33,24 @@ DRUM_CLASS_LABELS = {
 
 FEATURE_MODE = "rawlin12_handcrafted"
 FEATURE_CHANNELS = 21
-RAW_ACC_MEAN = 0.43534696102142334
-RAW_ACC_STD = 7.724777698516846
-RAW_GYRO_MEAN = -0.5989146828651428
-RAW_GYRO_STD = 2.7989652156829834
-LINEAR_ACC_MEAN = 2.775578498840332
-LINEAR_ACC_STD = 8.29115104675293
-GYRO_MEAN = -0.5989146828651428
-GYRO_STD = 2.7989652156829834
+RAW_ACC_MEAN = -1.5373504161834717
+RAW_ACC_STD = 15.285881996154785
+RAW_GYRO_MEAN = -0.22666260600090027
+RAW_GYRO_STD = 3.0157175064086914
+LINEAR_ACC_MEAN = 1.3655122518539429
+LINEAR_ACC_STD = 15.427335739135742
+GYRO_MEAN = -0.22666260600090027
+GYRO_STD = 3.0157175064086914
 HANDCRAFTED_STATS = {
-    12: ("raw_acc_norm", 11.019449234008789, 7.626066207885742),
-    13: ("linear_acc_norm", 12.995800018310547, 7.774975299835205),
-    14: ("raw_gyro_norm", 3.9171178340911865, 3.0388989448547363),
-    15: ("gyro_norm", 3.9171178340911865, 3.0388989448547363),
-    16: ("raw_acc_delta_norm", 1.2930601835250854, 3.9165213108062744),
-    17: ("linear_acc_delta_norm", 1.237756371498108, 3.907350778579712),
-    18: ("gyro_delta_norm", 0.44010719656944275, 0.5516814589500427),
-    19: ("raw_linear_dot", 156.3450469970703, 633.968017578125),
-    20: ("raw_linear_cos", 0.5807366371154785, 0.5196294784545898),
+    12: ("raw_acc_norm", 12.697272300720215, 23.384702682495117),
+    13: ("linear_acc_norm", 15.31769847869873, 22.022035598754883),
+    14: ("raw_gyro_norm", 4.021728992462158, 3.3561110496520996),
+    15: ("gyro_norm", 4.021728992462158, 3.3561110496520996),
+    16: ("raw_acc_delta_norm", 4.644360065460205, 17.899290084838867),
+    17: ("linear_acc_delta_norm", 4.587034702301025, 17.903532028198242),
+    18: ("gyro_delta_norm", 0.7714515328407288, 2.0652413368225098),
+    19: ("raw_linear_dot", 665.7153930664062, 3529.447998046875),
+    20: ("raw_linear_cos", 0.3611887991428375, 0.6688123345375061),
 }
 
 DEFAULT_STANDARDIZE_STATS = {
@@ -80,6 +80,7 @@ class RegularizedInceptionTime(torch.nn.Module):
         self,
         c_in: int,
         c_out: int,
+        seq_len: int | None = None,
         nf: int = 32,
         ks: int = 40,
         bottleneck: bool = True,
@@ -99,7 +100,12 @@ class RegularizedInceptionTime(torch.nn.Module):
         self.gap = torch.nn.AdaptiveAvgPool1d(1)
         self.dropout = torch.nn.Dropout(dropout) if dropout and dropout > 0 else torch.nn.Identity()
         feature_dim = nf * 4
-        if head == "attention":
+        if head == "weighted":
+            n_t = int(seq_len or 15)
+            init_w = torch.exp(torch.linspace(0, 2.0, n_t))
+            self.time_weights = torch.nn.Parameter(init_w)
+            self.fc = torch.nn.Linear(feature_dim, c_out)
+        elif head == "attention":
             self.attn = torch.nn.Sequential(
                 torch.nn.Conv1d(feature_dim, max(feature_dim // 2, 1), kernel_size=1),
                 torch.nn.Tanh(),
@@ -121,7 +127,11 @@ class RegularizedInceptionTime(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.inceptionblock(x)
         gap = self.gap(x).squeeze(-1)
-        if self.head == "attention":
+        if self.head == "weighted":
+            T = x.shape[-1]
+            w = torch.softmax(self.time_weights[:T], dim=0)
+            features = (x * w.view(1, 1, -1)).sum(dim=-1)
+        elif self.head == "attention":
             attn_weights = torch.softmax(self.attn(x), dim=-1)
             pooled = (x * attn_weights).sum(dim=-1)
             features = torch.cat([gap, pooled], dim=1)
@@ -319,7 +329,13 @@ class DrumGestureRecognizer:
         class_count = int(fc_weight.shape[0])
         c_in = self._infer_input_channels(state_dict)
         self.input_channels = c_in
-        self.model = RegularizedInceptionTime(c_in=c_in, c_out=class_count, head="gap")
+        self.model_head = "weighted" if "time_weights" in state_dict else "gap"
+        self.model = RegularizedInceptionTime(
+            c_in=c_in,
+            c_out=class_count,
+            seq_len=self.window_size,
+            head=self.model_head,
+        )
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
@@ -331,8 +347,13 @@ class DrumGestureRecognizer:
         if not eval_path.exists():
             return stats, window_size
 
-        with eval_path.open("r", encoding="utf-8") as file:
-            metadata = json.load(file)
+        try:
+            with eval_path.open("r", encoding="utf-8") as file:
+                metadata = json.load(file)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # 兼容旧版 GBK 编码的 eval 文件 (如中文路径)
+            with eval_path.open("r", encoding="gbk") as file:
+                metadata = json.load(file)
         standardize_stats = metadata.get("standardize_stats", {})
         if isinstance(standardize_stats, dict):
             for key, value in standardize_stats.items():
