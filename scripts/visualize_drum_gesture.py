@@ -120,7 +120,7 @@ def _decrypt_file(enc_path: Path) -> tuple[bytes, str]:
 # ── defaults matching train_local_drum_gestures.py ──
 DEFAULT_PEAK_SEARCH_EACH_SIDE = 30       # frames (±150ms @200Hz)
 DEFAULT_WINDOW = 15                       # frames
-DEFAULT_LEAD_END_OFFSETS = (6, 4, 2, 0)  # lead offsets
+DEFAULT_LEAD_END_OFFSETS = (22, 20, 18, 16)  # lead offsets
 DEFAULT_SERIAL_EDGE = "FALLING"
 DEFAULT_DATA_DIR = "data"
 EXCLUDE_BEFORE_PEAK = 30                  # frames before peak (no negatives)
@@ -703,8 +703,8 @@ Examples:
     parser.add_argument("--peak-search", type=int,
                         default=DEFAULT_PEAK_SEARCH_EACH_SIDE,
                         help=f"Peak search radius in frames (default: {DEFAULT_PEAK_SEARCH_EACH_SIDE})")
-    parser.add_argument("--lead-offsets", type=str, default="6,4,2,0",
-                        help="Comma-separated lead offsets, e.g. 18,16,14,12 (default: 6,4,2,0)")
+    parser.add_argument("--lead-offsets", type=str, default="22,20,18,16",
+                        help="Comma-separated lead offsets, e.g. 22,20,18,16 (default: 22,20,18,16)")
 
     # Hit zone display
     parser.add_argument("--hit-pre", type=int, default=70,

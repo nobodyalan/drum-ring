@@ -159,6 +159,30 @@ MODEL_OPTIONS = [
         10,
     ),
     (
+        "w10,weighted_random_22-16",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_w10_lead22201816_rawlin12hc_weighted_balanced_random.pth",
+        10,
+    ),
+    (
+        "w15-weighted_random -lead22-16",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_w15_lead22201816_rawlin12hc_weighted_balanced_random.pth",
+        15,
+    ),
+    (
+        "w15-fulldata -weight-random-lead22-16",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "local_drum_all_w15_lead22201816_rawlin12hc_weighted_random.pth",
+        15,
+    ),
+    (
         "w15-no_weighted-no_switch-18,16,14,12",
         PROJECT_ROOT
         / "checkpoint"
@@ -217,6 +241,15 @@ FOOT_PROB_LOW = 0.40
 FOOT_COOLDOWN_MS = 200
 FOOT_CLASS_ID = 5
 FOOT_VOLUME_BOOST = 2.0  # 底鼓低频感知音量补偿
+
+# ── 分轨音量补偿（保持音色不变,仅调大音量）──
+PER_CLASS_VOLUME_BOOST = {
+    1: 1.6,   # 踩镲 (gesture_1_closed_hat)
+    2: 1.6,   # 通鼓2 (gesture_2_tom2)
+    3: 1.6,   # 军鼓 (gesture_3_snare)
+    4: 1.6,   # 通鼓1 (gesture_4_tom1)
+    5: FOOT_VOLUME_BOOST,  # 底鼓 (gesture_5_kick)
+}
 
 
 @dataclass(frozen=True)
@@ -1061,9 +1094,8 @@ class DrumGestureWindow(RingStreamWindowBase):
                 effect = QSoundEffect(self)
                 effect.setSource(QUrl.fromLocalFile(str(path.resolve())))
                 vol = float(self.volume_input.value())
-                if class_id == FOOT_CLASS_ID:
-                    vol = min(1.0, vol * FOOT_VOLUME_BOOST)
-                effect.setVolume(vol)
+                boost = PER_CLASS_VOLUME_BOOST.get(class_id, 1.0)
+                effect.setVolume(min(1.0, vol * boost))
                 voices.append(effect)
             self.sound_effects[class_id] = voices
             self.sound_voice_indices[class_id] = 0
@@ -1071,10 +1103,8 @@ class DrumGestureWindow(RingStreamWindowBase):
     def on_volume_changed(self, value: float) -> None:
         for class_id, voices in self.sound_effects.items():
             for effect in voices:
-                vol = float(value)
-                if class_id == FOOT_CLASS_ID:
-                    vol = min(1.0, vol * FOOT_VOLUME_BOOST)
-                effect.setVolume(vol)
+                boost = PER_CLASS_VOLUME_BOOST.get(class_id, 1.0)
+                effect.setVolume(min(1.0, float(value) * boost))
 
     def play_gesture_sound(self, class_id: int) -> None:
         voices = self.sound_effects.get(class_id)
