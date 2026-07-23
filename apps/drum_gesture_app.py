@@ -208,14 +208,15 @@ FOOT_MODEL_PATH = (
     PROJECT_ROOT
     / "model_train"
     / "models"
-    / "test_model_nodelay_final"
+    / "test_model_nodelay"
     / "hit_detector_inception.pth"
 )
 FOOT_OSC_PORT = 8888
-FOOT_PROB_HIGH = 0.85
+FOOT_PROB_HIGH = 0.88
 FOOT_PROB_LOW = 0.40
-FOOT_COOLDOWN_MS = 400
+FOOT_COOLDOWN_MS = 200
 FOOT_CLASS_ID = 5
+FOOT_VOLUME_BOOST = 2.0  # 底鼓低频感知音量补偿
 
 
 @dataclass(frozen=True)
@@ -1059,15 +1060,21 @@ class DrumGestureWindow(RingStreamWindowBase):
             for _index in range(SOUND_VOICES_PER_CLASS):
                 effect = QSoundEffect(self)
                 effect.setSource(QUrl.fromLocalFile(str(path.resolve())))
-                effect.setVolume(float(self.volume_input.value()))
+                vol = float(self.volume_input.value())
+                if class_id == FOOT_CLASS_ID:
+                    vol = min(1.0, vol * FOOT_VOLUME_BOOST)
+                effect.setVolume(vol)
                 voices.append(effect)
             self.sound_effects[class_id] = voices
             self.sound_voice_indices[class_id] = 0
 
     def on_volume_changed(self, value: float) -> None:
-        for voices in self.sound_effects.values():
+        for class_id, voices in self.sound_effects.items():
             for effect in voices:
-                effect.setVolume(float(value))
+                vol = float(value)
+                if class_id == FOOT_CLASS_ID:
+                    vol = min(1.0, vol * FOOT_VOLUME_BOOST)
+                effect.setVolume(vol)
 
     def play_gesture_sound(self, class_id: int) -> None:
         voices = self.sound_effects.get(class_id)

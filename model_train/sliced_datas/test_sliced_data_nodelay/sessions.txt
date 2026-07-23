@@ -17,5 +17,7 @@ slow_neg_wxt_0
 slow_wxt_0
 whr_double_1
 whr_fast_1
+whr_neg_1
+whr_neg_2
 whr_neg_3
 whr_slow_2

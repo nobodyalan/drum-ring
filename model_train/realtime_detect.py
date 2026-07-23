@@ -12,11 +12,11 @@
 
 ────────────────────────────────────────────────────────────────────────────
  模型模式参数:
-   --model PATH           模型 .pth 路径 (默认: models/hit_detector_inception.pth)
+   --model PATH           模型 .pth 路径 (默认: models/test_model_nodelay/hit_detector_inception.pth)
    --port PORT            OSC UDP 端口 (默认: 8888)
-   --prob-high P          概率高阈值, 超过触发 (默认: 0.85)
-   --prob-low P           概率低阈值, 低于释放 (默认: 0.4)
-   --cooldown MS          冷却时间 ms (默认: 400)
+   --prob-high P          概率高阈值, 超过触发 (默认: 0.88)
+   --prob-low P           概率低阈值, 低于释放 (默认: 0.40)
+   --cooldown MS          冷却时间 ms (默认: 200)
    --sound-wav WAV        触发音效文件 (默认: 1.wav)
    --calibrate            校准模式: 采集背景数据, 建议阈值
    --plot                 实时绘图: P(hit) 曲线 + 阈值线
@@ -68,10 +68,10 @@ matplotlib.use('TkAgg')
 
 # ==================== 默认参数 ====================
 OSC_PORT = 8888
-PROB_HIGH = 0.85              # 概率高阈值 (超过触发)
-PROB_LOW = 0.4                # 概率低阈值 (低于释放滞回)
-COOLDOWN_MS = 400             # 触发后冷却时间 (ms)
-MODEL_PATH = "models/hit_detector_inception.pth"
+PROB_HIGH = 0.88              # 概率高阈值 (超过触发)
+PROB_LOW = 0.40               # 概率低阈值 (低于释放滞回)
+COOLDOWN_MS = 200             # 触发后冷却时间 (ms)
+MODEL_PATH = "models/test_model_nodelay/hit_detector_inception.pth"
 CALIBRATE_SEC = 30            # 校准模式采集秒数
 
 
@@ -354,9 +354,9 @@ class RealtimeDetector:
 
     def __init__(self, model, mean: np.ndarray, std: np.ndarray,
                  window_frames: int,
-                 prob_high: float = 0.85,
-                 prob_low: float = 0.4,
-                 cooldown_ms: int = 400,
+                 prob_high: float = 0.88,
+                 prob_low: float = 0.40,
+                 cooldown_ms: int = 200,
                  sound_wav: str = "1.wav"):
         self.model = model
         self.mean = mean
