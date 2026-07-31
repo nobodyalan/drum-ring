@@ -103,6 +103,35 @@ Ring BLE → WebSocket Server → stream_hub → DrumGestureWindow
 
 队列长度 = stable_window * 200Hz / step = ~2
 触发条件: 队列中某手势类别计数 >= trigger_ratio * 队列长度
+
+注意: 码中 stable_window 默认值为 0.02s (非 CLAUDE.md 描述的 0.04s)。
+     0.02s 时 queue_length = round(0.02*200/5) = 1 → 无投票，立即触发。
+     0.04s 时 queue_length = 2 → 需连续 2 次一致。
+```
+
+### CPU 推理优化
+
+```
+推理线程优化 (DrumInferenceWorker._set_realtime_priority):
+  torch.set_num_threads(1)     → 推理 6.4ms → 2.2ms (↓66%)
+  OMP_NUM_THREADS + MKL_NUM_THREADS = 1
+  SetThreadPriority(HIGHEST)    → jitter 3.8x → 1.5x
+
+⚠ 重要: set_num_threads(1) 改变 BatchNorm/Linear 浮点累加顺序，
+        不同线程数下相同输入可能产生 ~1e-6 概率偏移。
+        对高置信度(>0.9)无影响，对 border case(~0.55) 可能翻转 argmax。
+        解决: 训练时也加 torch.set_num_threads(1)，训练-推理线程配置一致。
+```
+
+### 手势混淆与延迟经验
+
+```
+混淆: 踩镲(1) ↔ 通鼓2(2) 最常见，大力做 gesture 1 易误触 gesture 2。
+      军鼓(3) 和通鼓1(4) 几乎无混淆。
+
+延迟: 模型 natural lead ≈ 25帧(125ms)，训练 lead=16-22帧。
+      增大动作幅度（延长加速过程）可使特征更早出现，降低感知延迟。
+      但根本上需增大训练 lead 覆盖早期信号。
 ```
 
 ### DrumGestureRecognizer 模型 (models/drum_gesture_recognizer.py)

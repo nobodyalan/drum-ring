@@ -32,6 +32,9 @@ Usage:
   # Save to file
   python scripts/visualize_drum_gesture.py --stamp 1783340555 --save plot.png
 
+  # Show delay between raw_acc and linear_acc (overlay single-axis)
+  python scripts/visualize_drum_gesture.py --stamp 1783340555 --show-delay
+
   # Keep decrypted files for inspection
   python scripts/visualize_drum_gesture.py --stamp 1783340555 --keep-decrypted
 """
@@ -460,6 +463,7 @@ def plot_recording(
     hit_post_ms: int = 150,
     title: str | None = None,
     save_path: str | None = None,
+    show_delay: bool = False,
 ) -> plt.Figure:
     """Main plotting routine.
 
@@ -514,11 +518,13 @@ def plot_recording(
                     if t_min <= peak_times[i] <= t_max]
 
     # ── build figure ──
-    fig = plt.figure(figsize=(16, 12), constrained_layout=True)
-    gs = GridSpec(4, 1, figure=fig, height_ratios=[1, 1, 1, 1.4],
+    n_rows = 5 if show_delay else 4
+    hr = [1, 1, 1, 1.4, 0.8] if show_delay else [1, 1, 1, 1.4]
+    fig = plt.figure(figsize=(16, 14 if show_delay else 12), constrained_layout=True)
+    gs = GridSpec(n_rows, 1, figure=fig, height_ratios=hr,
                   hspace=0.10)
-    axes = [fig.add_subplot(gs[i, 0]) for i in range(4)]
-    ax_acc, ax_gyro, ax_lin, ax_mag = axes
+    axes = [fig.add_subplot(gs[i, 0]) for i in range(n_rows)]
+    ax_acc, ax_gyro, ax_lin, ax_mag = axes[:4]
 
     # ── Panel 1: Raw Accelerometer ──
     for ch, letter in enumerate("xyz"):
@@ -588,6 +594,39 @@ def plot_recording(
     ax_mag.tick_params(labelsize=8)
     ax_mag.set_title("Magnitudes + Hit Zones + Positive Windows",
                      fontsize=9, color="gray", loc="left")
+
+    # ── Panel 5 (optional): Raw vs Linear delay overlay ──
+    if show_delay:
+        ax_delay = axes[4]
+        # Pick the axis with largest variance in linear_acc
+        var_xyz = np.var(linear_acc, axis=0)
+        best_ch = int(np.argmax(var_xyz))
+        best_letter = "xyz"[best_ch]
+
+        ax_delay.plot(t_rel, raw_acc[:, best_ch],
+                       color="#e74c3c", lw=1.2, alpha=0.85,
+                       label=f"raw_acc.{best_letter} (instant)")
+        ax_delay.plot(t_rel, linear_acc[:, best_ch],
+                       color="#2980b9", lw=1.2, alpha=0.85,
+                       label=f"linear_acc.{best_letter} (filtered, ~200ms lag)")
+        # Also show gravity_sensor as reference (reconstruct from raw - linear)
+        grav_est = raw_acc[:, best_ch] - linear_acc[:, best_ch]
+        ax_delay.plot(t_rel, grav_est,
+                       color="#27ae60", lw=0.7, alpha=0.5, ls="--",
+                       label=f"raw−linear ≈ gravity.{best_letter}")
+
+        _add_event_lines(ax_delay, events_in, peaks_in, t_min, t_max)
+        _add_hit_zones(ax_delay, peaks_in, hit_pre_ms, hit_post_ms, t_min, t_max)
+        ax_delay.set_ylabel(f"accel (g)", fontsize=10, fontweight="bold")
+        ax_delay.set_xlabel("time (s)", fontsize=11)
+        ax_delay.legend(loc="upper right", fontsize=7, ncol=3,
+                        framealpha=0.6, edgecolor="none")
+        ax_delay.tick_params(labelsize=8)
+        ax_delay.set_title(
+            f"Delay: raw_acc vs linear_acc (axis {best_letter}, highest variance) | "
+            f"red leads blue ≈ filter lag",
+            fontsize=9, color="gray", loc="left")
+        _setup_time_axes([ax_delay], t_min, t_max)
 
     # ── time axis formatting ──
     _setup_time_axes(axes, t_min, t_max)
@@ -715,6 +754,8 @@ Examples:
     # Output
     parser.add_argument("--save", type=str, default=None,
                         help="Save figure to file instead of displaying")
+    parser.add_argument("--show-delay", action="store_true",
+                        help="Add 5th panel: overlay raw_acc vs linear_acc to visualize ~200ms filter lag")
     parser.add_argument("--title", type=str, default=None,
                         help="Custom plot title")
     parser.add_argument("--keep-decrypted", action="store_true",
@@ -1107,6 +1148,7 @@ def main() -> int:
         hit_post_ms=args.hit_post,
         title=args.title,
         save_path=args.save,
+        show_delay=args.show_delay,
     )
     return 0
 

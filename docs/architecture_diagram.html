@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drum-Ring System Architecture</title>
+<style>
+  :root {
+    --hw-color: #E8734A;
+    --hw-bg: #FFF5F0;
+    --hw-border: #F5C6B3;
+    --transport-color: #3B82C4;
+    --transport-bg: #F0F7FF;
+    --transport-border: #A8D0F0;
+    --app-color: #10A37F;
+    --app-bg: #F0FFF8;
+    --app-border: #8ED8C0;
+    --model-color: #7C3AED;
+    --model-bg: #F8F4FF;
+    --model-border: #C4B5F0;
+    --train-color: #6366F1;
+    --train-bg: #F5F4FF;
+    --train-border: #B8B5F0;
+    --text: #1E293B;
+    --text-secondary: #64748B;
+    --bg: #F8FAFC;
+    --card-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    --layer-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+    background: #E2E8F0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .diagram {
+    width: 1280px; height: 800px;
+    background: #FFFFFF;
+    border-radius: 16px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.12);
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    grid-template-rows: 60px 1fr 1fr 1fr 1fr 60px;
+    gap: 0;
+    overflow: hidden;
+    position: relative;
+  }
+  /* Title bar */
+  .title-bar {
+    grid-column: 1 / 3; grid-row: 1;
+    background: linear-gradient(135deg, #1E293B 0%, #334155 100%);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 32px;
+    color: white;
+  }
+  .title-bar .title { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
+  .title-bar .subtitle { font-size: 13px; color: #94A3B8; }
+  /* Footer */
+  .footer-bar {
+    grid-column: 1 / 3; grid-row: 6;
+    background: #F1F5F9;
+    display: flex; align-items: center; justify-content: center;
+    gap: 32px; font-size: 12px; color: #64748B;
+  }
+  .footer-bar .metric { display: flex; align-items: center; gap: 6px; }
+  .footer-bar .metric strong { color: #1E293B; font-size: 16px; }
+
+  /* Layers - left column */
+  .layer {
+    position: relative;
+    margin: 10px 16px 10px 16px;
+    border-radius: 12px;
+    border: 2px solid;
+    padding: 14px 20px;
+    display: flex; flex-direction: column;
+  }
+  .layer-label {
+    position: absolute; top: -13px; left: 20px;
+    font-size: 11px; font-weight: 700; letter-spacing: 2px;
+    padding: 3px 12px; border-radius: 20px;
+    color: white;
+  }
+  .layer-content { display: flex; gap: 16px; flex: 1; align-items: stretch; margin-top: 6px; }
+  .layer-card {
+    flex: 1;
+    background: white;
+    border-radius: 8px;
+    box-shadow: var(--card-shadow);
+    padding: 12px 16px;
+    display: flex; flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    position: relative;
+  }
+  .layer-card .card-title { font-size: 13px; font-weight: 700; }
+  .layer-card .card-desc  { font-size: 11px; color: var(--text-secondary); line-height: 1.6; }
+
+  /* Layer-specific styles */
+  .layer-hw {
+    grid-column: 1; grid-row: 2;
+    background: var(--hw-bg); border-color: var(--hw-border);
+  }
+  .layer-hw .layer-label { background: var(--hw-color); }
+  .layer-hw .card-title { color: var(--hw-color); }
+
+  .layer-transport {
+    grid-column: 1; grid-row: 3;
+    background: var(--transport-bg); border-color: var(--transport-border);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .layer-transport .layer-label { background: var(--transport-color); }
+  .layer-transport .transport-card {
+    background: white; border-radius: 10px; box-shadow: var(--card-shadow);
+    padding: 14px 32px; text-align: center;
+  }
+
+  .layer-app {
+    grid-column: 1; grid-row: 4;
+    background: var(--app-bg); border-color: var(--app-border);
+  }
+  .layer-app .layer-label { background: var(--app-color); }
+  .layer-app .card-title { color: var(--app-color); }
+
+  .layer-model {
+    grid-column: 1; grid-row: 5;
+    background: var(--model-bg); border-color: var(--model-border);
+  }
+  .layer-model .layer-label { background: var(--model-color); }
+  .layer-model .card-title { color: var(--model-color); }
+
+  /* Training pipeline - right column */
+  .train-pipeline {
+    grid-column: 2; grid-row: 2 / 6;
+    background: var(--train-bg);
+    border: 2px solid var(--train-border);
+    border-radius: 12px;
+    margin: 10px 16px 10px 4px;
+    padding: 16px 14px;
+    display: flex; flex-direction: column;
+    gap: 8px;
+    position: relative;
+  }
+  .train-pipeline .pipeline-title {
+    font-size: 12px; font-weight: 700; letter-spacing: 2px;
+    color: var(--train-color); text-align: center; margin-bottom: 4px;
+  }
+  .train-step {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: var(--card-shadow);
+    font-size: 11px;
+    border-left: 4px solid var(--train-color);
+    position: relative;
+  }
+  .train-step .step-num {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--train-color); color: white;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; flex-shrink: 0;
+  }
+  .train-step .step-text { font-weight: 600; color: var(--text); }
+  .train-step .step-desc { font-size: 10px; color: var(--text-secondary); }
+
+  /* Arrow connectors between train steps */
+  .step-arrow {
+    width: 0; height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid var(--train-border);
+    align-self: center;
+  }
+
+  /* Vertical arrows between layers */
+  .inter-layer-arrow-wrapper {
+    grid-column: 1; grid-row: 2 / 6;
+    pointer-events: none; z-index: 10;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: space-around;
+    padding: 140px 0;
+  }
+
+  /* Data flow tags */
+  .flow-tag {
+    position: absolute;
+    font-size: 10px; color: var(--text-secondary);
+    font-weight: 600; white-space: nowrap;
+  }
+
+  /* Legend dots in footer */
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+  }
+
+  /* Arrow SVG overlay */
+  .arrows-overlay {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; pointer-events: none; z-index: 20;
+  }
+</style>
+</head>
+<body>
+<div class="diagram" style="position: relative;">
+
+  <!-- Title -->
+  <div class="title-bar">
+    <div>
+      <span class="title">🥁 Drum-Ring 系统架构</span>
+      <span style="margin-left:16px;font-size:12px;color:#94A3B8;">System Architecture Overview</span>
+    </div>
+    <div class="subtitle">智能戒指鼓击手势识别 · 课程项目</div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer-bar">
+    <div class="metric"><span class="legend-dot" style="background:var(--hw-color)"></span> 硬件层</div>
+    <div class="metric"><span class="legend-dot" style="background:var(--transport-color)"></span> 传输层</div>
+    <div class="metric"><span class="legend-dot" style="background:var(--app-color)"></span> 应用层</div>
+    <div class="metric"><span class="legend-dot" style="background:var(--model-color)"></span> 模型层</div>
+    <div style="width:1px;height:16px;background:#CBD5E1;margin:0 8px;"></div>
+    <div class="metric">⚡ 推理 <strong>2.2ms</strong></div>
+    <div class="metric">📡 采样 <strong>200Hz</strong></div>
+    <div class="metric">🎯 窗口 <strong>100ms</strong></div>
+    <div class="metric">🔢 输出 <strong>5 类</strong></div>
+  </div>
+
+  <!-- ====== Layer 1: Hardware ====== -->
+  <div class="layer layer-hw">
+    <div class="layer-label">① 硬件层 HARDWARE</div>
+    <div class="layer-content">
+      <div class="layer-card">
+        <div class="card-title">💍 BLE 智能戒指</div>
+        <div class="card-desc">
+          · IMU 6 轴 (加速度 + 陀螺仪)<br>
+          · 采样率 200Hz，低功耗蓝牙<br>
+          · 佩戴于手指，捕捉手势动作
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;color:var(--hw-color);font-weight:700;font-size:20px;">⟶</div>
+      <div class="layer-card" style="border-left:4px solid var(--hw-color);">
+        <div class="card-title">🥁 Arduino + 压电传感器</div>
+        <div class="card-desc">
+          · USB 串口连接 PC<br>
+          · 检测物理敲击/踩踏事件<br>
+          · <strong>训练数据标注</strong> (Ground Truth)
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Layer 2: Transport ====== -->
+  <div class="layer layer-transport">
+    <div class="layer-label">② 传输层 TRANSPORT</div>
+    <div class="transport-card">
+      <div style="font-size:15px;font-weight:700;color:var(--transport-color);">🔄 WebSocket Server</div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">
+        <code style="background:#F0F7FF;padding:2px 8px;border-radius:4px;">stream_hub.py</code>
+        &nbsp;·&nbsp;
+        <code style="background:#F0F7FF;padding:2px 8px;border-radius:4px;">127.0.0.1:17888</code>
+        &nbsp;·&nbsp; JSONL Publish/Subscribe 模式
+      </div>
+      <div style="font-size:10px;color:#94A3B8;margin-top:4px;">一个戒指 → 多个消费者同时订阅</div>
+    </div>
+  </div>
+
+  <!-- ====== Layer 3: Application ====== -->
+  <div class="layer layer-app">
+    <div class="layer-label">③ 应用层 APPLICATION</div>
+    <div class="layer-content">
+      <div class="layer-card">
+        <div class="card-title">🖥️ PyQt6 桌面端</div>
+        <div class="card-desc">
+          · <strong>DrumGestureWindow</strong> — 实时推理主窗口<br>
+          · DrumInferenceWorker — 后台推理线程<br>
+          · DrumRingState — 每戒指独立状态管理<br>
+          · 参数面板 + 概率图表 + 音效触发<br>
+          · 数据录制与可视化工具
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;color:var(--app-color);font-weight:700;font-size:20px;">⇄</div>
+      <div class="layer-card" style="border-left:4px solid var(--app-color);">
+        <div class="card-title">📱 iOS App</div>
+        <div class="card-desc">
+          · <strong>CoreML</strong> 独立运行<br>
+          · 无需 PC，戒指直连手机<br>
+          · 模型转换: .pth → .mlmodel<br>
+          · Swift + CoreBluetooth
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Layer 4: Model ====== -->
+  <div class="layer layer-model">
+    <div class="layer-label">④ 模型层 MODEL</div>
+    <div class="layer-content">
+      <div class="layer-card">
+        <div class="card-title">🧠 RegularizedInceptionTime</div>
+        <div class="card-desc">
+          · <strong>输入</strong>: 21 通道 × 20 帧 (100ms 窗口)<br>
+          · 原始 12 通道 + 手工特征 9 通道 (模长/差分/夹角)<br>
+          · InceptionTime Backbone: ks=40, depth=6, nf=32<br>
+          · GAP Head → Linear(128, 5)
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;color:var(--model-color);font-weight:700;font-size:20px;">→</div>
+      <div class="layer-card" style="border-left:4px solid var(--model-color);text-align:center;">
+        <div class="card-title">5 类鼓击手势</div>
+        <div class="card-desc" style="font-size:14px;font-weight:700;letter-spacing:2px;">
+          空 · 踩镲 · 通鼓2 · 军鼓 · 通鼓1
+        </div>
+        <div class="card-desc" style="margin-top:4px;">
+          触发策略: 历史队列投票 + 冷却 120ms
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Training Pipeline (Right Sidebar) ====== -->
+  <div class="train-pipeline">
+    <div class="pipeline-title">🔧 训练流水线</div>
+    <div class="train-step">
+      <div class="step-num">1</div>
+      <div>
+        <div class="step-text">数据录制</div>
+        <div class="step-desc">Arduino标注 + 戒指IMU</div>
+      </div>
+    </div>
+    <div class="step-arrow"></div>
+    <div class="train-step">
+      <div class="step-num">2</div>
+      <div>
+        <div class="step-text">标注清理</div>
+        <div class="step-desc">去异常 / 过近点击</div>
+      </div>
+    </div>
+    <div class="step-arrow"></div>
+    <div class="train-step">
+      <div class="step-num">3</div>
+      <div>
+        <div class="step-text">窗口切片</div>
+        <div class="step-desc">峰值对齐 + 正负例平衡</div>
+      </div>
+    </div>
+    <div class="step-arrow"></div>
+    <div class="train-step">
+      <div class="step-num">4</div>
+      <div>
+        <div class="step-text">模型训练</div>
+        <div class="step-desc">InceptionTime 5分类</div>
+      </div>
+    </div>
+    <div class="step-arrow"></div>
+    <div class="train-step">
+      <div class="step-num">5</div>
+      <div>
+        <div class="step-text">Badcase 分析</div>
+        <div class="step-desc">混淆矩阵 → 迭代改进</div>
+      </div>
+    </div>
+    <div class="step-arrow"></div>
+    <div class="train-step">
+      <div class="step-num">6</div>
+      <div>
+        <div class="step-text">模型部署</div>
+        <div class="step-desc">桌面 + iOS CoreML</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SVG Arrows between layers -->
+  <svg class="arrows-overlay" viewBox="0 0 1060 800" preserveAspectRatio="none">
+    <!-- Arrow: Hardware → Transport -->
+    <defs>
+      <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#3B82C4"/>
+      </marker>
+      <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#10A37F"/>
+      </marker>
+      <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#7C3AED"/>
+      </marker>
+    </defs>
+
+    <!-- HW → Transport -->
+    <line x1="530" y1="187" x2="530" y2="215" stroke="#3B82C4" stroke-width="2.5" marker-end="url(#arrowBlue)"/>
+    <text x="545" y="205" font-size="10" fill="#64748B" font-weight="600">BLE / USB</text>
+
+    <!-- Transport → App -->
+    <line x1="530" y1="282" x2="530" y2="310" stroke="#10A37F" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+    <text x="545" y="300" font-size="10" fill="#64748B" font-weight="600">JSONL Stream</text>
+
+    <!-- App → Model -->
+    <line x1="530" y1="442" x2="530" y2="470" stroke="#7C3AED" stroke-width="2.5" marker-end="url(#arrowPurple)"/>
+    <text x="545" y="460" font-size="10" fill="#64748B" font-weight="600">predict()</text>
+
+    <!-- Training pipeline → Model (horizontal connection) -->
+    <line x1="80" y1="610" x2="80" y2="632" stroke="#6366F1" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrowPurple)"/>
+    <text x="92" y="626" font-size="10" fill="#64748B" font-weight="600">训练产出 .pth → 模型层加载</text>
+  </svg>
+
+  <!-- Data flow annotation between transport and app -->
+  <div style="position:absolute;left:560px;top:295px;font-size:10px;color:#10A37F;font-weight:700;z-index:25;background:white;padding:2px 6px;border-radius:4px;">
+    订阅 IMU 流
+  </div>
+
+  <!-- Key feature callout on model layer -->
+  <div style="position:absolute;right:250px;top:635px;background:var(--model-bg);border:1px solid var(--model-border);border-radius:6px;padding:6px 10px;font-size:10px;color:var(--model-color);font-weight:600;z-index:25;">
+    ⚡ CPU 单线程推理 · 6.4ms → 2.2ms (↓66%)
+  </div>
+
+</div>
+</body>
+</html>

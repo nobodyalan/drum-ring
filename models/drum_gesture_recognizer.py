@@ -14,7 +14,7 @@ DEFAULT_CHECKPOINT_PATH = (
     PROJECT_ROOT
     / "checkpoint"
     / "drum_gesture"
-    / "local_drum_lead63_transition.pth"
+    / "w15-17ch-zone22-group-v4p.pth"
 )
 
 WINDOW_SIZE = 15
@@ -32,25 +32,22 @@ DRUM_CLASS_LABELS = {
 }
 
 FEATURE_MODE = "rawlin12_handcrafted"
-FEATURE_CHANNELS = 21
+FEATURE_CHANNELS = 17
 RAW_ACC_MEAN = -1.5373504161834717
 RAW_ACC_STD = 15.285881996154785
 RAW_GYRO_MEAN = -0.22666260600090027
 RAW_GYRO_STD = 3.0157175064086914
 LINEAR_ACC_MEAN = 1.3655122518539429
 LINEAR_ACC_STD = 15.427335739135742
-GYRO_MEAN = -0.22666260600090027
-GYRO_STD = 3.0157175064086914
 HANDCRAFTED_STATS = {
-    12: ("raw_acc_norm", 12.697272300720215, 23.384702682495117),
-    13: ("linear_acc_norm", 15.31769847869873, 22.022035598754883),
-    14: ("raw_gyro_norm", 4.021728992462158, 3.3561110496520996),
-    15: ("gyro_norm", 4.021728992462158, 3.3561110496520996),
-    16: ("raw_acc_delta_norm", 4.644360065460205, 17.899290084838867),
-    17: ("linear_acc_delta_norm", 4.587034702301025, 17.903532028198242),
-    18: ("gyro_delta_norm", 0.7714515328407288, 2.0652413368225098),
-    19: ("raw_linear_dot", 665.7153930664062, 3529.447998046875),
-    20: ("raw_linear_cos", 0.3611887991428375, 0.6688123345375061),
+    9:  ("raw_acc_norm", 12.697272300720215, 23.384702682495117),
+    10: ("linear_acc_norm", 15.31769847869873, 22.022035598754883),
+    11: ("raw_gyro_norm", 4.021728992462158, 3.3561110496520996),
+    12: ("raw_acc_delta_norm", 4.644360065460205, 17.899290084838867),
+    13: ("linear_acc_delta_norm", 4.587034702301025, 17.903532028198242),
+    14: ("gyro_delta_norm", 0.7714515328407288, 2.0652413368225098),
+    15: ("raw_linear_dot", 665.7153930664062, 3529.447998046875),
+    16: ("raw_linear_cos", 0.3611887991428375, 0.6688123345375061),
 }
 
 DEFAULT_STANDARDIZE_STATS = {
@@ -60,8 +57,6 @@ DEFAULT_STANDARDIZE_STATS = {
     "raw_gyro_std": RAW_GYRO_STD,
     "linear_acc_mean": LINEAR_ACC_MEAN,
     "linear_acc_std": LINEAR_ACC_STD,
-    "gyro_mean": GYRO_MEAN,
-    "gyro_std": GYRO_STD,
     **{name + "_mean": mean for _channel, (name, mean, _std) in HANDCRAFTED_STATS.items()},
     **{name + "_std": std for _channel, (name, _mean, std) in HANDCRAFTED_STATS.items()},
 }
@@ -82,8 +77,9 @@ class RegularizedInceptionTime(torch.nn.Module):
         c_out: int,
         seq_len: int | None = None,
         nf: int = 32,
-        ks: int = 40,
-        bottleneck: bool = True,
+        ks: int = 15,
+        depth: int = 4,
+        bottleneck: bool = False,
         dropout: float = 0.0,
         head: str = "gap",
         gru_hidden: int = 32,
@@ -94,6 +90,7 @@ class RegularizedInceptionTime(torch.nn.Module):
             c_out,
             nf=nf,
             ks=ks,
+            depth=depth,
             bottleneck=bottleneck,
         ).inceptionblock
         self.head = head
@@ -271,22 +268,28 @@ def build_rawlin12_handcrafted_window(
     raw_linear_window: np.ndarray,
     window_size: int | None = None,
 ) -> np.ndarray:
+    """从 9 通道原始窗口 [raw_acc×3, raw_gyro×3, linear_acc×3] 构建 17 通道特征窗口。
+
+    输出 17 通道:
+      raw_acc[3] + raw_gyro[3] + linear_acc[3]          = 9  (基础)
+      raw_acc_norm + linear_acc_norm + raw_gyro_norm     = 3  (模长)
+      raw_acc_delta + linear_acc_delta + gyro_delta       = 3  (急动度)
+      raw_linear_dot + raw_linear_cos                     = 2  (运动-重力夹角)
+    """
     values = np.asarray(raw_linear_window, dtype=np.float32)
     expected_window = int(window_size or WINDOW_SIZE)
-    if values.shape != (expected_window, 12):
-        raise ValueError(f"输入窗口必须为 ({expected_window}, 12)，收到: {values.shape}")
+    if values.shape != (expected_window, 9):
+        raise ValueError(f"输入窗口必须为 ({expected_window}, 9)，收到: {values.shape}")
     raw_acc = values[:, 0:3]
     raw_gyro = values[:, 3:6]
     linear_acc = values[:, 6:9]
-    gyro = values[:, 9:12]
 
     raw_acc_norm = _norm(raw_acc)
     linear_acc_norm = _norm(linear_acc)
     raw_gyro_norm = _norm(raw_gyro)
-    gyro_norm = _norm(gyro)
     raw_acc_delta_norm = _norm(_delta(raw_acc))
     linear_acc_delta_norm = _norm(_delta(linear_acc))
-    gyro_delta_norm = _norm(_delta(gyro))
+    gyro_delta_norm = _norm(_delta(raw_gyro))
     raw_linear_dot = np.sum(raw_acc * linear_acc, axis=1, keepdims=True).astype(np.float32)
     raw_linear_cos = (raw_linear_dot / np.maximum(raw_acc_norm * linear_acc_norm, 1e-6)).astype(
         np.float32
@@ -296,11 +299,9 @@ def build_rawlin12_handcrafted_window(
             raw_acc,
             raw_gyro,
             linear_acc,
-            gyro,
             raw_acc_norm,
             linear_acc_norm,
             raw_gyro_norm,
-            gyro_norm,
             raw_acc_delta_norm,
             linear_acc_delta_norm,
             gyro_delta_norm,
@@ -374,6 +375,16 @@ class DrumGestureRecognizer:
         values = np.asarray(raw_linear_window, dtype=np.float32)
         if self.input_channels == FEATURE_CHANNELS:
             values = build_rawlin12_handcrafted_window(values, self.window_size)
+        elif self.input_channels == 21:
+            # 旧版 21 通道格式 (12 base + 9 handcrafted):
+            #   0-2: raw_acc    3-5: raw_gyro    6-8: linear_acc    9-11: gyro (=raw_gyro)
+            #   12-20: handcrafted (比 17ch 多一个 gyro_norm 在末尾)
+            feat17 = build_rawlin12_handcrafted_window(values, self.window_size)  # (W, 17)
+            raw_gyro = values[:, 3:6]
+            gyro_norm = _norm(raw_gyro)  # = raw_gyro_norm, 重复通道
+            values = np.concatenate(
+                [feat17[:, :9], raw_gyro, feat17[:, 9:], gyro_norm], axis=1
+            ).astype(np.float32)
         elif self.input_channels == 6:
             if values.shape == (self.window_size, 12):
                 values = values[:, 6:12]
@@ -384,15 +395,27 @@ class DrumGestureRecognizer:
         values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
         values = values.T.copy()
         stats = self.standardize_stats
-        if self.input_channels == FEATURE_CHANNELS:
+        if self.input_channels in (FEATURE_CHANNELS, 21):
             values[0:3, :] = (values[0:3, :] - stats["raw_acc_mean"]) / stats["raw_acc_std"]
             values[3:6, :] = (values[3:6, :] - stats["raw_gyro_mean"]) / stats["raw_gyro_std"]
             values[6:9, :] = (values[6:9, :] - stats["linear_acc_mean"]) / stats["linear_acc_std"]
-            values[9:12, :] = (values[9:12, :] - stats["gyro_mean"]) / stats["gyro_std"]
+            if self.input_channels == 21:
+                # channels 9-11: gyro (= raw_gyro duplicate), same mean/std
+                values[9:12, :] = (values[9:12, :] - stats.get("gyro_mean", stats["raw_gyro_mean"])) / stats.get("gyro_std", stats["raw_gyro_std"])
             for channel, (_name, mean, std) in HANDCRAFTED_STATS.items():
                 channel_mean = stats.get(f"{_name}_mean", mean)
                 channel_std = stats.get(f"{_name}_std", std)
-                values[channel, :] = (values[channel, :] - channel_mean) / channel_std
+                if self.input_channels == 21:
+                    # 21ch: handcrafted channels 12-20 (offset by +3 from 17ch's 9-16)
+                    ch = channel + 3
+                else:
+                    ch = channel
+                values[ch, :] = (values[ch, :] - channel_mean) / channel_std
+            if self.input_channels == 21:
+                # 额外通道 20: gyro_norm (= raw_gyro_norm duplicate)
+                gnm = stats.get("gyro_norm_mean", stats.get("raw_gyro_norm_mean", 4.0))
+                gns = stats.get("gyro_norm_std", stats.get("raw_gyro_norm_std", 3.4))
+                values[20, :] = (values[20, :] - gnm) / gns
         else:
             values[:3, :] = (values[:3, :] - stats["linear_acc_mean"]) / stats["linear_acc_std"]
             values[3:, :] = (values[3:, :] - stats["gyro_mean"]) / stats["gyro_std"]

@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 import torch
 from fastai.callback.schedule import fit_one_cycle, valley  # noqa: F401
-from fastai.callback.tracker import SaveModelCallback
+from fastai.callback.tracker import EarlyStoppingCallback, SaveModelCallback
 from fastai.learner import Learner
 from fastai.losses import LabelSmoothingCrossEntropyFlat
 from fastai.optimizer import Adam
@@ -50,14 +50,25 @@ from models.drum_gesture_recognizer import (  # noqa: E402
 )
 
 
-WINDOW = 15
-LEAD_END_OFFSETS = (18, 16, 14, 12)
+WINDOW = 15  # 75ms @200Hz
+# ── 正例 zone: 窗口末帧落在 [peak-POS_ZONE_END_FIRST, peak-POS_ZONE_END_LAST] 内即为正例 ──
+POS_ZONE_END_FIRST = 22  # 最早窗口末帧: peak-22
+POS_ZONE_END_LAST = 16   # 最晚窗口末帧: peak-16
+POS_ZONE_STRIDE = 2      # 采样步长 (帧), 2帧=10ms@200Hz
+# 采样点: peak-22, peak-20, peak-18, peak-16 → 4 个/峰
+POSITIVE_ZONE_END_FRAMES = tuple(
+    range(POS_ZONE_END_FIRST, POS_ZONE_END_LAST - 1, -POS_ZONE_STRIDE)
+)  # (22, 20, 18, 16)
 PEAK_SEARCH_EACH_SIDE = 2 * WINDOW
 EXCLUDE_BEFORE_PEAK = 30
 EXCLUDE_AFTER_PEAK = 24
-TRANSITION_FRAMES_BEFORE = 20  # 100ms @200Hz — region before positive windows forced as negative
-TRANSITION_NEGATIVES_PER_PEAK = 4  # negative windows sampled from each peak's transition zone
-HARD_NEGATIVES_PER_FILE = 380
+TRANSITION_START_OFFSET = 58  # transition zone starts at peak - TRANSITION_START_OFFSET
+TRANSITION_END_OFFSET = 30    # transition zone stops at peak - TRANSITION_END_OFFSET (exclusive)
+# Derived: transition zone = [peak - 58, peak - 30) = 29 frames (145ms)
+# 过渡末帧 [peak-44, peak-31], 正例末帧 [peak-22, peak-16]
+# 边界 gap: peak-31 到 peak-22 = 9 帧 (45ms) — 够区分, 不太远
+TRANSITION_NEGATIVES_PER_PEAK = 6  # negative windows sampled from each peak's transition zone
+HARD_NEGATIVES_PER_FILE = 80
 SEED = 42
 LABEL_IDS = (1, 2, 3, 4)
 LABEL_LAST_DIGIT = False
@@ -117,7 +128,8 @@ def parse_args() -> argparse.Namespace:
         help="Interpret multi-digit suffixes such as lqw_22 as label 2.",
     )
     parser.add_argument("--window", type=int, default=WINDOW)
-    parser.add_argument("--lead-end-offsets", type=parse_int_tuple, default=LEAD_END_OFFSETS)
+    parser.add_argument("--lead-end-offsets", type=parse_int_tuple, default=POSITIVE_ZONE_END_FRAMES,
+                        help="Comma-separated end-frame offsets from peak for positive windows (default from zone).")
     parser.add_argument("--peak-search-samples", type=int, default=PEAK_SEARCH_EACH_SIDE)
     parser.add_argument("--exclude-before-peak", type=int, default=EXCLUDE_BEFORE_PEAK)
     parser.add_argument("--exclude-after-peak", type=int, default=EXCLUDE_AFTER_PEAK)
@@ -141,9 +153,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
-    parser.add_argument("--gaussian-noise", type=float, default=0.02)
-    parser.add_argument("--input-dropout", type=float, default=0.05)
-    parser.add_argument("--cutout", type=float, default=0.05)
+    parser.add_argument("--gaussian-noise", type=float, default=0.05)
+    parser.add_argument("--input-dropout", type=float, default=0.10)
+    parser.add_argument("--cutout", type=float, default=0.10)
     parser.add_argument(
         "--use-peak-exclusion",
         action="store_true",
@@ -157,17 +169,16 @@ def parse_args() -> argparse.Namespace:
         default=TRANSITION_NEGATIVES_PER_PEAK,
         help="Number of forced negative windows sampled from the 100ms before each peak's positive region.",
     )
-    parser.add_argument(
-        "--transition-frames-before",
-        type=int,
-        default=TRANSITION_FRAMES_BEFORE,
-        help="Duration (in frames @200Hz) of the forced-negative zone before each peak's positive region.",
-    )
     parser.add_argument("--balance-classes", action="store_true")
     parser.add_argument("--split-mode", choices=["group", "random"], default="group")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--val-size", type=float, default=0.20,
                         help="Validation fraction of train+val groups (default: 0.20)")
+    parser.add_argument(
+        "--val-one-per-class",
+        action="store_true",
+        help="Validation: exactly 1 non-switch recording per gesture class. Switch recordings never enter val.",
+    )
     parser.add_argument("--lr-find", action="store_true",
                         help="Run LR finder before training to pick optimal learning rate")
     parser.add_argument("--device", type=str, default="auto",
@@ -345,14 +356,13 @@ def estimate_linear_recording(imu: np.ndarray) -> np.ndarray:
     acc = imu[:, 2:5].astype(np.float32)
     gyro = imu[:, 5:8].astype(np.float32)
     estimator = OnlineLinearAccelerationEstimator()
-    rows = np.zeros((imu.shape[0], 6), dtype=np.float32)
+    rows = np.zeros((imu.shape[0], 3), dtype=np.float32)
     last_t = float(t[0])
     for index in range(imu.shape[0]):
         current_t = float(t[index])
         dt = current_t - last_t if index else 1.0 / 200.0
         linear_acc, _gravity = estimator.update(acc[index], gyro[index], dt)
-        rows[index, :3] = linear_acc
-        rows[index, 3:] = gyro[index]
+        rows[index] = linear_acc
         last_t = current_t
     return rows
 
@@ -384,19 +394,24 @@ def _delta(values: np.ndarray) -> np.ndarray:
     return np.diff(values, axis=0, prepend=values[:1]).astype(np.float32)
 
 
-def handcrafted_channels(raw6: np.ndarray, linear_imu: np.ndarray) -> np.ndarray:
+def handcrafted_channels(raw6: np.ndarray, linear_acc3: np.ndarray) -> np.ndarray:
+    """从 raw6 (acc×3+gyro×3) + linear_acc3 (去重力加速度×3) 构建 8 个手工特征。
+
+    返回 8 通道:
+      raw_acc_norm, linear_acc_norm, raw_gyro_norm,
+      raw_acc_delta, linear_acc_delta, gyro_delta,
+      raw_linear_dot, raw_linear_cos
+    """
     raw_acc = raw6[:, :3]
     raw_gyro = raw6[:, 3:6]
-    linear_acc = linear_imu[:, :3]
-    gyro = linear_imu[:, 3:6]
+    linear_acc = linear_acc3[:, :3]
 
     raw_acc_norm = _norm(raw_acc)
     linear_acc_norm = _norm(linear_acc)
     raw_gyro_norm = _norm(raw_gyro)
-    gyro_norm = _norm(gyro)
     raw_acc_delta_norm = _norm(_delta(raw_acc))
     linear_acc_delta_norm = _norm(_delta(linear_acc))
-    gyro_delta_norm = _norm(_delta(gyro))
+    gyro_delta_norm = _norm(_delta(raw_gyro))
 
     raw_linear_dot = np.sum(raw_acc * linear_acc, axis=1, keepdims=True).astype(np.float32)
     denom = np.maximum(raw_acc_norm * linear_acc_norm, 1e-6)
@@ -407,7 +422,6 @@ def handcrafted_channels(raw6: np.ndarray, linear_imu: np.ndarray) -> np.ndarray
             raw_acc_norm,
             linear_acc_norm,
             raw_gyro_norm,
-            gyro_norm,
             raw_acc_delta_norm,
             linear_acc_delta_norm,
             gyro_delta_norm,
@@ -423,23 +437,29 @@ def feature_recording(raw_imu: np.ndarray, linear_imu: np.ndarray, feature_mode:
     if feature_mode == "lin6":
         return linear_imu.astype(np.float32)
     if feature_mode == "rawlin12":
-        return np.concatenate([raw6, linear_imu], axis=1).astype(np.float32)
+        # 9 通道: raw_acc(3) + raw_gyro(3) + linear_acc(3), 不重复 gyro
+        return np.concatenate([raw6, linear_imu[:, :3]], axis=1).astype(np.float32)
     if feature_mode == "rawlin12_handcrafted":
-        base = np.concatenate([raw6, linear_imu], axis=1).astype(np.float32)
-        return np.concatenate([base, handcrafted_channels(raw6, linear_imu)], axis=1).astype(np.float32)
+        # 基础 9 通道: raw_acc(3) + raw_gyro(3) + linear_acc(3), 不重复 gyro
+        base = np.concatenate([raw6, linear_imu[:, :3]], axis=1).astype(np.float32)
+        return np.concatenate([base, handcrafted_channels(raw6, linear_imu[:, :3])], axis=1).astype(np.float32)
     raise ValueError(f"Unsupported feature_mode: {feature_mode}")
 
 
 def positive_windows(feature_imu: np.ndarray, peaks: list[int]) -> np.ndarray:
+    """从连续 positive zone 内按 stride 提取正例窗口。
+
+    Zone = [peak - ZONE_END_FIRST, peak - ZONE_END_LAST] (末帧 inclusive)。
+    每个 zone 内的末帧位置都标注为正例，训练时按 POS_ZONE_STRIDE 采样。
+    """
     segments = []
     channel_count = int(feature_imu.shape[1])
     for peak in peaks:
-        for lead in LEAD_END_OFFSETS:
-            end_exclusive = peak - lead + 1
-            start = end_exclusive - WINDOW
-            if start < 0 or end_exclusive > feature_imu.shape[0]:
+        for end_inclusive in range(peak - POS_ZONE_END_FIRST, peak - POS_ZONE_END_LAST + 1, POS_ZONE_STRIDE):
+            start = end_inclusive - WINDOW + 1
+            if start < 0 or end_inclusive >= feature_imu.shape[0]:
                 continue
-            segment = feature_imu[start:end_exclusive, :]
+            segment = feature_imu[start:end_inclusive + 1, :]
             if segment.shape == (WINDOW, channel_count):
                 segments.append(segment)
     if not segments:
@@ -450,44 +470,29 @@ def positive_windows(feature_imu: np.ndarray, peaks: list[int]) -> np.ndarray:
 def _forbidden_end_inclusive_set(
     peaks: list[int],
     window: int,
-    lead_offsets: tuple[int, ...],
     n_samples: int,
-    transition_frames_before: int,
     use_peak_exclusion: bool = False,
     exclude_before: int = 30,
     exclude_after: int = 24,
 ) -> set[int]:
-    """Collect end-inclusive indices that overlap with positive windows or transition zones."""
+    """Collect end-inclusive indices that overlap with positive zone or transition zones."""
     forbidden: set[int] = set()
     for peak in peaks:
-        # ── positive window region ──
-        # Window for lead L covers [peak - window - L + 1, peak - L]
-        # A negative window [e - window + 1, e] overlaps this positive window when:
-        #   e - window + 1 <= peak - L  AND  e >= peak - window - L + 1
-        # → e in [peak - window + 1,   peak - L + window - 1]
-        min_lead = min(lead_offsets)
-        max_lead = max(lead_offsets)
-        pos_end_lo = peak - window + 1
-        pos_end_hi = peak - min_lead + window - 1
-        for e in range(max(0, pos_end_lo), min(n_samples, pos_end_hi + 1)):
+        # ── positive zone exclusion: [peak - ZONE_END_FIRST, peak - ZONE_END_LAST] ──
+        pos_end_lo = max(0, peak - POS_ZONE_END_FIRST)
+        pos_end_hi = min(n_samples - 1, peak - POS_ZONE_END_LAST)
+        for e in range(pos_end_lo, pos_end_hi + 1):
             forbidden.add(e)
 
-        # ── transition zone (100ms before earliest positive window) ──
-        # Earliest positive window start: peak - window - max_lead + 1
-        # Transition zone: [earliest_pos_start - transition_frames_before, earliest_pos_start - 1]
-        # A negative window ending at e falls in the transition zone when its
-        # end_inclusive is in [trans_start + window - 1,  trans_end - 1]
-        earliest_pos_start = peak - window - max_lead + 1
-        trans_start = earliest_pos_start - transition_frames_before
-        trans_end = earliest_pos_start  # exclusive
+        # ── transition zone: [peak - TRANSITION_START_OFFSET, peak - TRANSITION_END_OFFSET) ──
+        trans_start = peak - TRANSITION_START_OFFSET
+        trans_end = peak - TRANSITION_END_OFFSET  # exclusive
         trans_e_lo = max(0, trans_start + window - 1)
         trans_e_hi = min(n_samples - 1, trans_end - 1)
         for e in range(trans_e_lo, trans_e_hi + 1):
             forbidden.add(e)
 
         # ── optional peak exclusion zone ──
-        # Guard band around the peak itself: [peak - before, peak + after + window - 1]
-        # Prevents random negatives from landing on the impact/reverb region
         if use_peak_exclusion:
             excl_lo = max(0, peak - exclude_before)
             excl_hi = min(n_samples - 1, peak + exclude_after + window - 1)
@@ -500,8 +505,6 @@ def safe_negative_end_indices(
     n_samples: int,
     peaks: list[int],
     window: int,
-    lead_offsets: tuple[int, ...],
-    transition_frames_before: int,
     use_peak_exclusion: bool = False,
     exclude_before: int = 30,
     exclude_after: int = 24,
@@ -509,7 +512,7 @@ def safe_negative_end_indices(
     valid = np.ones(n_samples, dtype=bool)
     valid[: window - 1] = False  # boundary protection
     forbidden = _forbidden_end_inclusive_set(
-        peaks, window, lead_offsets, n_samples, transition_frames_before,
+        peaks, window, n_samples,
         use_peak_exclusion=use_peak_exclusion,
         exclude_before=exclude_before,
         exclude_after=exclude_after,
@@ -524,27 +527,19 @@ def transition_negative_windows(
     feature_imu: np.ndarray,
     peaks: list[int],
     window: int,
-    lead_offsets: tuple[int, ...],
-    transition_frames_before: int,
     negatives_per_peak: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Sample fixed negative windows from the transition zone (100ms) before each peak's
-    earliest positive window.  These forced negatives teach the model that the pre-gesture
-    preparation motion is *not* a gesture — reducing false triggers during gesture switching.
-    """
+    """Sample negative windows from the transition zone before each peak's positive zone."""
     channel_count = int(feature_imu.shape[1])
     if channel_count <= 0 or not peaks or negatives_per_peak <= 0:
         return np.empty((0, max(channel_count, 1), window), dtype=np.float32)
 
-    max_lead = max(lead_offsets)
     segments: list[np.ndarray] = []
     for peak in peaks:
-        earliest_pos_start = peak - window - max_lead + 1
-        trans_start = earliest_pos_start - transition_frames_before  # inclusive
-        trans_end = earliest_pos_start  # exclusive
+        trans_start = peak - TRANSITION_START_OFFSET  # inclusive
+        trans_end = peak - TRANSITION_END_OFFSET  # exclusive
 
-        # Valid end_inclusive range so the window fits entirely inside [trans_start, trans_end)
         min_end = trans_start + window - 1
         max_end = trans_end - 1
         if min_end > max_end or trans_start < 0:
@@ -572,15 +567,13 @@ def negative_windows(
     rng: np.random.Generator,
     count: int,
     window: int,
-    lead_offsets: tuple[int, ...],
-    transition_frames_before: int,
     use_peak_exclusion: bool = False,
     exclude_before: int = 30,
     exclude_after: int = 24,
 ) -> tuple[np.ndarray, int]:
     channel_count = int(feature_imu.shape[1])
     end_indices = safe_negative_end_indices(
-        feature_imu.shape[0], peaks, window, lead_offsets, transition_frames_before,
+        feature_imu.shape[0], peaks, window,
         use_peak_exclusion=use_peak_exclusion,
         exclude_before=exclude_before,
         exclude_after=exclude_after,
@@ -646,7 +639,6 @@ def build_dataset(
     serial_edge: str,
     feature_mode: str,
     transition_negatives_per_peak: int = TRANSITION_NEGATIVES_PER_PEAK,
-    transition_frames_before: int = TRANSITION_FRAMES_BEFORE,
     use_peak_exclusion: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     rng = np.random.default_rng(seed)
@@ -658,14 +650,15 @@ def build_dataset(
     groups: list[str] = []
     summary = {
         "window": WINDOW,
-        "lead_end_offsets": list(LEAD_END_OFFSETS),
+        "lead_end_offsets": list(POSITIVE_ZONE_END_FRAMES),
         "peak_search_each_side": PEAK_SEARCH_EACH_SIDE,
         "serial_edge": serial_edge,
         "feature_mode": feature_mode,
         "transition_negatives": {
             "enabled": True,
-            "frames_before_positive": transition_frames_before,
-            "ms_before_positive": transition_frames_before * 5,  # 5 ms per frame @ 200 Hz
+            "start_offset": TRANSITION_START_OFFSET,
+            "end_offset": TRANSITION_END_OFFSET,
+            "width_frames": TRANSITION_START_OFFSET - TRANSITION_END_OFFSET,
             "negatives_per_peak": transition_negatives_per_peak,
         },
         "negative_exclusion": {
@@ -746,8 +739,8 @@ def build_dataset(
                 if hint is not None:
                     start_label = hint
                 peak_labels = _build_switch_labels(a, b, start_label, len(peaks))
-                # 每个 peak 生成 len(LEAD_END_OFFSETS) 个窗口 → 展开为逐窗口标签
-                pos_labels = np.repeat(peak_labels, len(LEAD_END_OFFSETS))[: pos.shape[0]]
+                # 每个 peak 生成 len(POSITIVE_ZONE_END_FRAMES) 个窗口 → 展开为逐窗口标签
+                pos_labels = np.repeat(peak_labels, len(POSITIVE_ZONE_END_FRAMES))[: pos.shape[0]]
                 pos_label_for_group = f"switch{a}{b}"
             else:
                 pos_labels = np.full(pos.shape[0], recording.label, dtype=np.int64)
@@ -764,20 +757,16 @@ def build_dataset(
             rng,
             hard_negatives_per_file,
             WINDOW,
-            LEAD_END_OFFSETS,
-            transition_frames_before,
             use_peak_exclusion=use_peak_exclusion,
             exclude_before=EXCLUDE_BEFORE_PEAK,
             exclude_after=EXCLUDE_AFTER_PEAK,
         )
 
-        # ── transition negatives: forced sampling from 100ms before each peak's positive region ──
+        # ── transition negatives ──
         trans_neg = transition_negative_windows(
             feature_imu,
             peaks,
             WINDOW,
-            LEAD_END_OFFSETS,
-            transition_frames_before,
             transition_negatives_per_peak,
             rng,
         )
@@ -849,6 +838,7 @@ def split_by_group(
     seed: int,
     test_size: float,
     val_size: float = 0.20,
+    val_one_per_class: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     unique_groups, group_indices = np.unique(groups, return_inverse=True)
     group_labels = []
@@ -871,39 +861,84 @@ def split_by_group(
     n_classes = len(label_counts)
     n_val = max(n_classes, int(val_size * len(train_val_groups)))
 
-    try:
-        train_groups, val_groups = train_test_split(
-            train_val_groups,
-            test_size=n_val,
-            stratify=train_val_labels,
-            random_state=seed,
-        )
-    except ValueError:
-        # 分层拆分失败 → 手动确保每类至少 1 个 group 进验证集
+    if val_one_per_class:
+        # ── 每类抽 1 个非 switch 录制进验证集，switch 录制不进入验证集 ──
         rng = np.random.default_rng(seed)
-        val_groups_list = []
-        train_groups_list = list(train_val_groups)
+        val_groups_list: list = []
+        train_groups_list: list = list(train_val_groups)
+
+        # 1) 为 1-3 类各选 1 个非 switch group，class 4 数据少跳过
+        val_labels_picked: set[int] = set()
         for label in sorted(label_counts.keys()):
-            # 找该类别的所有 group
-            class_mask = train_val_labels == label
+            if label == 0:
+                continue
+            if label == 4:
+                continue  # class 4 样本太少，不进入验证集
+            class_mask = (train_val_labels == label)
             class_groups = train_val_groups[class_mask].tolist()
-            if len(class_groups) >= 2:
-                # 随机选 1 个进验证集
-                chosen = rng.choice(class_groups, size=1, replace=False)[0]
+            non_switch = [g for g in class_groups if "switch" not in str(g).lower()]
+            if non_switch:
+                chosen = rng.choice(non_switch, size=1, replace=False)[0]
                 val_groups_list.append(chosen)
                 train_groups_list.remove(chosen)
-        # 如果还没达到目标验证集大小，从 train 随机补充
-        n_extra = n_val - len(val_groups_list)
-        if n_extra > 0 and len(train_groups_list) > 0:
-            extra = rng.choice(train_groups_list, size=min(n_extra, len(train_groups_list)), replace=False).tolist()
-            val_groups_list.extend(extra)
-            for g in extra:
-                train_groups_list.remove(g)
+                val_labels_picked.add(label)
+
+        # 2) 为补足目标数，从 1-3 类再随机抽 1 个非 switch（代替 class 4）
+        n_extra = max(0, n_val - len(val_groups_list))
+        if n_extra > 0:
+            extra_pool = [
+                g for g in train_groups_list
+                if "switch" not in str(g).lower()
+                and int(group_labels[np.where(unique_groups == g)[0][0]]) in (1, 2, 3)
+            ]
+            if extra_pool:
+                extra = rng.choice(extra_pool, size=min(n_extra, len(extra_pool)), replace=False).tolist()
+                val_groups_list.extend(extra)
+                for g in extra:
+                    train_groups_list.remove(g)
+                    val_labels_picked.add(int(group_labels[np.where(unique_groups == g)[0][0]]))
+
         train_groups = np.array(train_groups_list)
         val_groups = np.array(val_groups_list)
-        val_labels = [label_counts[l] for l in [int(group_labels[np.where(unique_groups == g)[0][0]]) for g in val_groups]]
+        val_labels = [int(group_labels[np.where(unique_groups == g)[0][0]]) for g in val_groups]
         val_covered = len(set(val_labels))
-        print(f"  Val split: manual (min {min_groups_per_class}/class), {len(val_groups)} groups covering {val_covered}/{n_classes} classes")
+        switch_val = sum(1 for g in val_groups if "switch" in str(g).lower())
+        print(f"  Val split: one-per-class (non-switch), {len(val_groups)} groups covering {val_covered}/{n_classes} classes, switch in val: {switch_val}")
+
+    else:
+        try:
+            train_groups, val_groups = train_test_split(
+                train_val_groups,
+                test_size=n_val,
+                stratify=train_val_labels,
+                random_state=seed,
+            )
+        except ValueError:
+            # 分层拆分失败 → 手动确保每类至少 1 个 group 进验证集
+            rng = np.random.default_rng(seed)
+            val_groups_list = []
+            train_groups_list = list(train_val_groups)
+            for label in sorted(label_counts.keys()):
+                # 找该类别的所有 group
+                class_mask = train_val_labels == label
+                class_groups = train_val_groups[class_mask].tolist()
+                if len(class_groups) >= 2:
+                    # 随机选 1 个进验证集
+                    chosen = rng.choice(class_groups, size=1, replace=False)[0]
+                    val_groups_list.append(chosen)
+                    train_groups_list.remove(chosen)
+            # 如果还没达到目标验证集大小，从 train 随机补充
+            n_extra = n_val - len(val_groups_list)
+            if n_extra > 0 and len(train_groups_list) > 0:
+                extra = rng.choice(train_groups_list, size=min(n_extra, len(train_groups_list)), replace=False).tolist()
+                val_groups_list.extend(extra)
+                for g in extra:
+                    train_groups_list.remove(g)
+            train_groups = np.array(train_groups_list)
+            val_groups = np.array(val_groups_list)
+            val_labels = [label_counts[l] for l in [int(group_labels[np.where(unique_groups == g)[0][0]]) for g in val_groups]]
+            val_covered = len(set(val_labels))
+            print(f"  Val split: manual (min {min_groups_per_class}/class), {len(val_groups)} groups covering {val_covered}/{n_classes} classes")
     train_mask = np.isin(groups, train_groups)
     val_mask = np.isin(groups, val_groups)
     test_mask = np.isin(groups, test_groups)
@@ -988,21 +1023,19 @@ def standardize_channel_groups(
             "raw_acc": slice(0, 3),
             "raw_gyro": slice(3, 6),
             "linear_acc": slice(6, 9),
-            "gyro": slice(9, 12),
         }
         if feature_mode == "rawlin12_handcrafted":
             handcrafted_names = [
                 "raw_acc_norm",
                 "linear_acc_norm",
                 "raw_gyro_norm",
-                "gyro_norm",
                 "raw_acc_delta_norm",
                 "linear_acc_delta_norm",
                 "gyro_delta_norm",
                 "raw_linear_dot",
                 "raw_linear_cos",
             ]
-            for offset, name in enumerate(handcrafted_names, start=12):
+            for offset, name in enumerate(handcrafted_names, start=9):
                 groups[name] = slice(offset, offset + 1)
     else:
         raise ValueError(f"Unsupported feature_mode: {feature_mode}")
@@ -1055,11 +1088,19 @@ def train_model(
     val_size: float,
     feature_mode: str,
     split_mode: str,
+    val_one_per_class: bool = False,
     lr_find: bool = False,
     device_str: str = "auto",
     time_weight_pooling: bool = False,
 ) -> dict:
     set_seed(seed)
+
+    # ── 训练-推理线程配置一致: 避免浮点累加顺序差异导致概率偏移 ──
+    # 与 apps/drum_gesture_app.py 的 DrumInferenceWorker._set_realtime_priority() 一致
+    torch.set_num_threads(1)
+    import os as _os_train
+    _os_train.environ.setdefault("OMP_NUM_THREADS", "1")
+    _os_train.environ.setdefault("MKL_NUM_THREADS", "1")
 
     # GPU auto-detect
     if device_str == "auto":
@@ -1084,6 +1125,7 @@ def train_model(
             seed,
             test_size,
             val_size,
+            val_one_per_class=val_one_per_class,
         )
     x_train, x_val, x_test, stats = standardize_channel_groups(
         x_train,
@@ -1157,7 +1199,10 @@ def train_model(
     learn.fit_one_cycle(
         epochs,
         lr_max=lr,
-        cbs=[SaveModelCallback(monitor="valid_loss", fname=best_name)],
+        cbs=[
+            SaveModelCallback(monitor="valid_loss", fname=best_name),
+            EarlyStoppingCallback(monitor="valid_loss", patience=8),
+        ],
     )
     learn.load(best_name)
 
@@ -1208,7 +1253,7 @@ def train_model(
 def main() -> int:
     args = parse_args()
     global WINDOW
-    global LEAD_END_OFFSETS
+    global POSITIVE_ZONE_END_FRAMES
     global PEAK_SEARCH_EACH_SIDE
     global EXCLUDE_BEFORE_PEAK
     global EXCLUDE_AFTER_PEAK
@@ -1216,7 +1261,7 @@ def main() -> int:
     global LABEL_LAST_DIGIT
 
     WINDOW = int(args.window)
-    LEAD_END_OFFSETS = tuple(args.lead_end_offsets)
+    POSITIVE_ZONE_END_FRAMES = tuple(args.lead_end_offsets)
     PEAK_SEARCH_EACH_SIDE = int(args.peak_search_samples)
     EXCLUDE_BEFORE_PEAK = int(args.exclude_before_peak)
     EXCLUDE_AFTER_PEAK = int(args.exclude_after_peak)
@@ -1258,7 +1303,6 @@ def main() -> int:
         serial_edge=args.serial_edge,
         feature_mode=args.feature_mode,
         transition_negatives_per_peak=args.transition_negatives_per_peak,
-        transition_frames_before=args.transition_frames_before,
         use_peak_exclusion=args.use_peak_exclusion,
     )
     balance_info = {"enabled": False}
@@ -1323,6 +1367,7 @@ def main() -> int:
         args.val_size,
         args.feature_mode,
         args.split_mode,
+        val_one_per_class=args.val_one_per_class,
         lr_find=args.lr_find,
         device_str=args.device,
         time_weight_pooling=bool(args.time_weight_pooling),

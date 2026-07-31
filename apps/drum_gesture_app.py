@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import queue
 import time
 from collections import Counter, deque
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import torch
 from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtMultimedia import QSoundEffect
@@ -51,159 +53,23 @@ DEFAULT_MODEL_PATH = (
     PROJECT_ROOT
     / "checkpoint"
     / "drum_gesture"
-    / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth"
+    / "w15-17ch-zone22-group-v4p.pth"
 )
 MODEL_OPTIONS = [
     (
-        "lead6,4,2,0,-3 + transition neg (99.7%)",
+        "v3p w15-17ch-zone22 (best acc 94.2%, low augment)",
         PROJECT_ROOT
         / "checkpoint"
         / "drum_gesture"
-        / "local_drum_lead63_transition.pth",
+        / "w15-17ch-zone22-group-v3p.pth",
         15,
     ),
     (
-        "BCL60371EA Full v2 w15 (99.6%)",
+        "v4p w15-17ch-zone22 (acc 90.8%, high augment anti-overfit)",
         PROJECT_ROOT
         / "checkpoint"
         / "drum_gesture"
-        / "local_drum_bcl60371ea_full_v2_w15_rawlin12hc.pth",
-        15,
-    ),
-    (
-        "lead10,8,6,4 + transition neg (97.9%)",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_lead10864_transition.pth",
-        15,
-    ),
-    (
-        "w20 lead6,4,2",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w20_lead642_rawlin12hc_balanced_random.pth",
-        20,
-    ),
-    (
-        "w15 lead6,4,2",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w15_lead642_rawlin12hc_balanced_random.pth",
-        15,
-    ),
-    (
-        "w10 lead6,4,2",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w10_lead642_rawlin12hc_balanced_random.pth",
-        10,
-    ),
-    (
-        "w15 lead10,8,6,4",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w15_lead10864_rawlin12hc_balanced_random.pth",
-        15,
-    ),
-    (
-        "w15 lead18,16,14,12",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w15_lead18161412_rawlin12hc_balanced_random.pth",
-        15,
-    ),
-    (
-        "w15 lead22,20,18,16",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w15_lead22201816_rawlin12hc_balanced_random.pth",
-        15,
-    ),
-    (
-        "w10 lead10,8,6,4",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w10_lead10864_rawlin12hc_balanced_random.pth",
-        10,
-    ),
-    (
-        "w10 lead14,12,10,8",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w10_lead1412108_rawlin12hc_balanced_random.pth",
-        10,
-    ),
-    (
-        "w10 lead18,16,14,12",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w10_lead18161412_rawlin12hc_balanced_random.pth",
-        10,
-    ),
-    (
-        "w10 lead22,20,18,16",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_plus_latest_w10_lead22201816_rawlin12hc_balanced_random.pth",
-        10,
-    ),
-    (
-        "w10,weighted_random_22-16",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_w10_lead22201816_rawlin12hc_weighted_balanced_random.pth",
-        10,
-    ),
-    (
-        "w15-weighted_random -lead22-16",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_w15_lead22201816_rawlin12hc_weighted_balanced_random.pth",
-        15,
-    ),
-    (
-        "w15-fulldata -weight-random-lead22-16",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_all_w15_lead22201816_rawlin12hc_weighted_random.pth",
-        15,
-    ),
-    (
-        "w15-no_weighted-no_switch-18,16,14,12",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_full_21ch_weighted.pth",
-        15,
-    ),
-    (
-        "w15-no_weighted-switch-18,16,14,12",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_full_21ch_switch.pth",
-        15,
-    ),
-    (
-        "w15-weighted-switch-18,16,14,12",
-        PROJECT_ROOT
-        / "checkpoint"
-        / "drum_gesture"
-        / "local_drum_full_21ch_switch-weighted.pth",
+        / "w15-17ch-zone22-group-v4p.pth",
         15,
     ),
 ]
@@ -307,7 +173,23 @@ class DrumInferenceWorker(QThread):
         self._jobs.put_nowait(None)
         self.wait(1500)
 
+    def _set_realtime_priority(self) -> None:
+        """Set high thread priority and limit PyTorch threading to reduce jitter."""
+        torch.set_num_threads(1)
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        try:
+            import ctypes.wintypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetCurrentThread()
+            kernel32.SetThreadPriority(handle, 2)  # THREAD_PRIORITY_HIGHEST
+        except Exception:
+            pass
+
     def run(self) -> None:
+        # ── 降低 CPU 调度抖动 ──
+        self._set_realtime_priority()
+
         try:
             recognizer = DrumGestureRecognizer(self.model_path)
         except Exception as exc:
@@ -838,7 +720,7 @@ class DrumGestureWindow(RingStreamWindowBase):
         )
         raw_acc = np.asarray(acc, dtype=np.float32)
         raw_gyro = np.asarray(gyr, dtype=np.float32)
-        sample = np.concatenate((raw_acc, raw_gyro, linear_acc, raw_gyro)).astype(np.float32)
+        sample = np.concatenate((raw_acc, raw_gyro, linear_acc)).astype(np.float32)
         state.samples.append(sample)
         state.norms.append(float(np.linalg.norm(linear_acc)))
         state.sample_count += 1
@@ -869,7 +751,7 @@ class DrumGestureWindow(RingStreamWindowBase):
             return
 
         values = np.stack(list(state.samples)[-window_size:], axis=0).astype(np.float32, copy=False)
-        if values.shape != (window_size, 12):
+        if values.shape != (window_size, 9):
             return
 
         state.frames_since_infer = 0
