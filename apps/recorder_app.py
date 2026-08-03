@@ -667,13 +667,20 @@ class RecorderWindow(RingStreamWindowBase):
             return None
         return numeric_parts[-1]
 
+    def _save_dir(self) -> str:
+        """纯负例录制存到 data/addition_data, 正常录制存到 data。"""
+        if self.chk_negative.isChecked():
+            return "data/addition_data"
+        return "data"
+
     def save_records(self) -> int:
         count = 0
         start_ts = self.record_start_ts or int(time.time())
         suffix = self._recording_suffix(start_ts)
+        save_dir = self._save_dir()
 
         if self.imu_records:
-            os.makedirs("data", exist_ok=True)
+            os.makedirs(save_dir, exist_ok=True)
             for address, rows in self.imu_records.items():
                 if not rows:
                     continue
@@ -681,7 +688,7 @@ class RecorderWindow(RingStreamWindowBase):
                 safe_name = self._safe_name(ring_name)
                 safe_address = self._safe_name(address)
                 plain_name = f"{safe_name}_{safe_address}_{suffix}.npy"
-                filename = f"data/{plain_name}.enc"
+                filename = f"{save_dir}/{plain_name}.enc"
                 buffer = io.BytesIO()
                 np.save(buffer, np.asarray(rows, dtype=np.float64))
                 stash(
@@ -692,7 +699,7 @@ class RecorderWindow(RingStreamWindowBase):
                 count += 1
 
         if self.audio_pcm:
-            os.makedirs("data", exist_ok=True)
+            os.makedirs(save_dir, exist_ok=True)
             for address, pcm in self.audio_pcm.items():
                 if not pcm:
                     continue
@@ -700,7 +707,7 @@ class RecorderWindow(RingStreamWindowBase):
                 safe_name = self._safe_name(ring_name)
                 safe_address = self._safe_name(address)
                 plain_name = f"{safe_name}_{safe_address}_{suffix}.wav"
-                filename = f"data/{plain_name}.enc"
+                filename = f"{save_dir}/{plain_name}.enc"
                 buffer = io.BytesIO()
                 with wave.open(buffer, "wb") as wavfile:
                     wavfile.setnchannels(1)
@@ -715,9 +722,9 @@ class RecorderWindow(RingStreamWindowBase):
                 count += 1
 
         if self.serial_records:
-            os.makedirs("data", exist_ok=True)
+            os.makedirs(save_dir, exist_ok=True)
             plain_name = f"serial_{suffix}.csv"
-            filename = f"data/{plain_name}.enc"
+            filename = f"{save_dir}/{plain_name}.enc"
             buffer = io.StringIO()
             buffer.write("wall_time,elapsed_s,line\n")
             for wall_time, elapsed, line in self.serial_records:

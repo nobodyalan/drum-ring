@@ -123,7 +123,7 @@ def _decrypt_file(enc_path: Path) -> tuple[bytes, str]:
 # ── defaults matching train_local_drum_gestures.py ──
 DEFAULT_PEAK_SEARCH_EACH_SIDE = 30       # frames (±150ms @200Hz)
 DEFAULT_WINDOW = 15                       # frames
-DEFAULT_LEAD_END_OFFSETS = (22, 20, 18, 16)  # lead offsets
+DEFAULT_LEAD_END_OFFSETS = (14, 12, 10, 8, 6, 4)  # zone 14-4
 DEFAULT_SERIAL_EDGE = "FALLING"
 DEFAULT_DATA_DIR = "data"
 EXCLUDE_BEFORE_PEAK = 30                  # frames before peak (no negatives)
@@ -315,6 +315,16 @@ def _add_hit_zones(ax, peak_times, pre_ms, post_ms, t_min, t_max):
                        color=HIT_ZONE_COLOR, alpha=0.08, zorder=0)
 
 
+def _draw_pre_post_band(ax, peak_times, pre_frames, post_frames, t_min, t_max):
+    """Draw red band [peak - pre_frames, peak - post_frames] on any panel."""
+    for pt in peak_times:
+        t0 = pt - pre_frames / 200.0
+        t1 = pt - post_frames / 200.0
+        if t1 > t_min and t0 < t_max:
+            ax.axvspan(max(t0, t_min), min(t1, t_max),
+                       color="#e74c3c", alpha=0.08, zorder=0, lw=0)
+
+
 def _add_peak_annotations(ax, event_times, peak_times, t_min, t_max):
     """Annotate each peak with Arduino→peak offset in ms."""
     y_min, y_max = ax.get_ylim()
@@ -464,6 +474,8 @@ def plot_recording(
     title: str | None = None,
     save_path: str | None = None,
     show_delay: bool = False,
+    pre_frames: int | None = None,
+    post_frames: int | None = None,
 ) -> plt.Figure:
     """Main plotting routine.
 
@@ -526,13 +538,20 @@ def plot_recording(
     axes = [fig.add_subplot(gs[i, 0]) for i in range(n_rows)]
     ax_acc, ax_gyro, ax_lin, ax_mag = axes[:4]
 
+    # Choose zone display: red band (--pre/--post) or green windows (--lead-offsets)
+    _draw_positive_zone = (
+        lambda ax: _draw_pre_post_band(ax, peaks_in, pre_frames, post_frames, t_min, t_max)
+    ) if (pre_frames is not None and post_frames is not None) else (
+        lambda ax: _add_window_zones(ax, linear_imu, peaks_idx_in, window, lead_offsets,
+                                     t_rel, t_min, t_max)
+    )
+
     # ── Panel 1: Raw Accelerometer ──
     for ch, letter in enumerate("xyz"):
         ax_acc.plot(t_rel, raw_acc[:, ch], color=ACC_COLORS[letter],
                     lw=0.7, alpha=0.85, label=f"{letter}")
     _add_event_lines(ax_acc, events_in, peaks_in, t_min, t_max)
-    _add_window_zones(ax_acc, linear_imu, peaks_idx_in, window, lead_offsets,
-                      t_rel, t_min, t_max)
+    _draw_positive_zone(ax_acc)
     ax_acc.set_ylabel("raw acc\n(g)", fontsize=10, fontweight="bold")
     ax_acc.legend(loc="upper right", fontsize=7, ncol=3,
                   framealpha=0.5, edgecolor="none")
@@ -545,8 +564,7 @@ def plot_recording(
         ax_gyro.plot(t_rel, raw_gyro[:, ch], color=GYRO_COLORS[letter],
                      lw=0.7, alpha=0.85, label=f"{letter}")
     _add_event_lines(ax_gyro, events_in, peaks_in, t_min, t_max)
-    _add_window_zones(ax_gyro, linear_imu, peaks_idx_in, window, lead_offsets,
-                      t_rel, t_min, t_max)
+    _draw_positive_zone(ax_gyro)
     ax_gyro.set_ylabel("raw gyro\n(rad/s)", fontsize=10, fontweight="bold")
     ax_gyro.legend(loc="upper right", fontsize=7, ncol=3,
                    framealpha=0.5, edgecolor="none")
@@ -559,8 +577,7 @@ def plot_recording(
                     lw=0.7, alpha=0.85, label=f"{letter}")
     _add_event_lines(ax_lin, events_in, peaks_in, t_min, t_max)
     _add_hit_zones(ax_lin, peaks_in, hit_pre_ms, hit_post_ms, t_min, t_max)
-    _add_window_zones(ax_lin, linear_imu, peaks_idx_in, window, lead_offsets,
-                      t_rel, t_min, t_max)
+    _draw_positive_zone(ax_lin)
     ax_lin.set_ylabel("linear acc\n(g)", fontsize=10, fontweight="bold")
     ax_lin.legend(loc="upper right", fontsize=7, ncol=3,
                   framealpha=0.5, edgecolor="none")
@@ -582,9 +599,7 @@ def plot_recording(
 
     _add_event_lines(ax_mag, events_in, peaks_in, t_min, t_max)
     _add_hit_zones(ax_mag, peaks_in, hit_pre_ms, hit_post_ms, t_min, t_max)
-    # Positive window zones (green)
-    _add_window_zones(ax_mag, linear_imu, peaks_idx_in, window, lead_offsets,
-                      t_rel, t_min, t_max)
+    _draw_positive_zone(ax_mag)
     _add_peak_annotations(ax_mag, events_in, peaks_in, t_min, t_max)
 
     ax_mag.set_ylabel("magnitude", fontsize=10, fontweight="bold")
@@ -742,7 +757,7 @@ Examples:
     parser.add_argument("--peak-search", type=int,
                         default=DEFAULT_PEAK_SEARCH_EACH_SIDE,
                         help=f"Peak search radius in frames (default: {DEFAULT_PEAK_SEARCH_EACH_SIDE})")
-    parser.add_argument("--lead-offsets", type=str, default="22,20,18,16",
+    parser.add_argument("--lead-offsets", type=str, default="14,12,10,8,6,4",
                         help="Comma-separated lead offsets, e.g. 22,20,18,16 (default: 22,20,18,16)")
 
     # Hit zone display
@@ -760,6 +775,14 @@ Examples:
                         help="Custom plot title")
     parser.add_argument("--keep-decrypted", action="store_true",
                         help="Keep decrypted files under data_decrypted/ for inspection")
+    parser.add_argument("--quick", action="store_true",
+                        help="Quick IMU view: no serial/peaks, just raw acc+gyro+|acc|. Use --file to specify.")
+    parser.add_argument("--quick-threshold", type=float, default=100.0,
+                        help="Quick mode peak threshold for |acc| (default: 100)")
+    parser.add_argument("--pre", type=int, default=None,
+                        help="Positive zone: pre-peak frames (red band [peak-pre, peak-post])")
+    parser.add_argument("--post", type=int, default=None,
+                        help="Positive zone: post-peak frames (red band [peak-pre, peak-post])")
 
     return parser.parse_args()
 
@@ -777,6 +800,114 @@ def list_recordings(decrypted_dir: Path) -> None:
     for stamp, rec in sorted(recordings.items()):
         print(f"  {stamp:<14} {rec['user']:<8} {rec['label']:<6} {rec['imu_path'].name}")
     print(f"\n  Total: {len(recordings)} recording(s)\n")
+
+
+def _quick_view(decrypted_dir: Path, args) -> int:
+    """Quick raw IMU view: no serial, no peaks. Matches normal plot style."""
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+    from matplotlib.gridspec import GridSpec
+    import numpy as np
+
+    # Find first matching .npy
+    imu_paths = sorted(decrypted_dir.glob("*.npy"))
+    if not imu_paths:
+        print("[X] No decrypted .npy files found.")
+        return 1
+    matched = imu_paths
+    if args.stamp:
+        matched = [p for p in matched if args.stamp in p.name]
+    if args.user:
+        matched = [p for p in matched if args.user in p.name]
+    if not matched:
+        print("[X] No IMU files match filter.")
+        return 1
+
+    imu_path = matched[0]
+    print(f"加载: {imu_path.name}")
+    imu = np.load(imu_path)
+
+    t = imu[:, 1] if imu.shape[1] > 1 and np.nanmax(imu[:, 1]) > 0 else imu[:, 0]
+    t = t.astype(np.float64) - float(t[0])
+    acc = imu[:, 2:5].astype(np.float32)
+    gyr = imu[:, 5:8].astype(np.float32)
+    acc_mag = np.linalg.norm(acc, axis=1)
+    gyr_mag = np.linalg.norm(gyr, axis=1)
+
+    t_min, t_max = args.range if args.range else (0.0, float(t[-1]))
+    mask = (t >= t_min) & (t <= t_max)
+
+    # ── simple peak detection: |acc| > 100, one per 40ms (8 frames @200Hz) ──
+    quick_peaks = []  # list of peak times (seconds)
+    if args.pre is not None and args.post is not None:
+        threshold = args.quick_threshold
+        min_gap_s = 0.040  # 40ms
+        i = 0
+        while i < len(t):
+            if mask[i] and acc_mag[i] > threshold:
+                quick_peaks.append(float(t[i]))
+                # Skip ahead by min_gap
+                skip_to_t = t[i] + min_gap_s
+                while i < len(t) and t[i] < skip_to_t:
+                    i += 1
+                continue
+            i += 1
+        print(f"  检测到 {len(quick_peaks)} 个简单峰值 (|acc|>{threshold})")
+
+    title = args.title or imu_path.stem
+
+    fig = plt.figure(figsize=(16, 10), constrained_layout=True)
+    gs = GridSpec(3, 1, figure=fig, height_ratios=[1, 1, 1.2], hspace=0.10)
+    ax_acc = fig.add_subplot(gs[0, 0])
+    ax_gyr = fig.add_subplot(gs[1, 0], sharex=ax_acc)
+    ax_mag = fig.add_subplot(gs[2, 0], sharex=ax_acc)
+
+    # Panel 1: Raw Accelerometer
+    for ch, letter in enumerate("xyz"):
+        ax_acc.plot(t[mask], acc[mask, ch], color=ACC_COLORS[letter],
+                    lw=0.8, alpha=0.85, label=f"acc_{letter}")
+    ax_acc.set_ylabel("raw acc\n(m/s²)", fontsize=10, fontweight="bold")
+    ax_acc.legend(loc="upper right", fontsize=7, ncol=3,
+                  framealpha=0.5, edgecolor="none")
+    ax_acc.tick_params(labelsize=8)
+    ax_acc.set_title(title, fontsize=9, color="gray", loc="left")
+
+    # Panel 2: Raw Gyroscope
+    for ch, letter in enumerate("xyz"):
+        ax_gyr.plot(t[mask], gyr[mask, ch], color=GYRO_COLORS[letter],
+                    lw=0.8, alpha=0.85, label=f"gyr_{letter}")
+    ax_gyr.set_ylabel("raw gyro\n(rad/s)", fontsize=10, fontweight="bold")
+    ax_gyr.legend(loc="upper right", fontsize=7, ncol=3,
+                  framealpha=0.5, edgecolor="none")
+    ax_gyr.tick_params(labelsize=8)
+
+    # Panel 3: Magnitudes
+    ax_mag.plot(t[mask], acc_mag[mask], color=MAG_COLORS["raw_acc"],
+                lw=1.0, alpha=0.75, label="|raw acc|")
+    ax_mag.plot(t[mask], gyr_mag[mask], color=MAG_COLORS["gyro"],
+                lw=1.0, alpha=0.75, label="|gyro|")
+    ax_mag.axhline(y=9.81, color="gray", linestyle="--", alpha=0.4, lw=0.8, label="1g")
+    ax_mag.set_ylabel("magnitude", fontsize=10, fontweight="bold")
+    ax_mag.legend(loc="upper right", fontsize=7, ncol=3,
+                  framealpha=0.5, edgecolor="none")
+    ax_mag.tick_params(labelsize=8)
+
+    # Time axis styling (match normal mode)
+    for ax in (ax_acc, ax_gyr, ax_mag):
+        _setup_time_axes([ax], t_min, t_max)
+        if quick_peaks:
+            _draw_pre_post_band(ax, quick_peaks, args.pre, args.post, t_min, t_max)
+            # Dashed red line at each detected peak
+            for pt in quick_peaks:
+                if t_min <= pt <= t_max:
+                    ax.axvline(x=pt, color="#e74c3c", linestyle="--", lw=0.6, alpha=0.5)
+
+    if args.save:
+        plt.savefig(args.save, dpi=150)
+        print(f"保存: {args.save}")
+    else:
+        plt.show()
+    return 0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1031,6 +1162,10 @@ def main() -> int:
         list_recordings(decrypted_dir)
         return 0
 
+    # ── quick mode: raw IMU only, no serial needed ──
+    if args.quick:
+        return _quick_view(decrypted_dir, args)
+
     recordings = collect_recordings(decrypted_dir)
     if not recordings:
         print("[X] No matching IMU+serial recordings found in decrypted data.")
@@ -1149,6 +1284,8 @@ def main() -> int:
         title=args.title,
         save_path=args.save,
         show_delay=args.show_delay,
+        pre_frames=args.pre,
+        post_frames=args.post,
     )
     return 0
 

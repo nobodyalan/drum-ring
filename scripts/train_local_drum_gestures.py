@@ -52,22 +52,20 @@ from models.drum_gesture_recognizer import (  # noqa: E402
 
 WINDOW = 15  # 75ms @200Hz
 # ── 正例 zone: 窗口末帧落在 [peak-POS_ZONE_END_FIRST, peak-POS_ZONE_END_LAST] 内即为正例 ──
-POS_ZONE_END_FIRST = 22  # 最早窗口末帧: peak-22
-POS_ZONE_END_LAST = 16   # 最晚窗口末帧: peak-16
+POS_ZONE_END_FIRST = 14  # 最早窗口末帧: peak-14 (70ms before peak)
+POS_ZONE_END_LAST = 4    # 最晚窗口末帧: peak-4 (20ms before peak)
 POS_ZONE_STRIDE = 2      # 采样步长 (帧), 2帧=10ms@200Hz
-# 采样点: peak-22, peak-20, peak-18, peak-16 → 4 个/峰
+# 采样点: peak-14, peak-12, peak-10, peak-8, peak-6, peak-4 → 6 个/峰
 POSITIVE_ZONE_END_FRAMES = tuple(
     range(POS_ZONE_END_FIRST, POS_ZONE_END_LAST - 1, -POS_ZONE_STRIDE)
 )  # (22, 20, 18, 16)
 PEAK_SEARCH_EACH_SIDE = 2 * WINDOW
 EXCLUDE_BEFORE_PEAK = 30
 EXCLUDE_AFTER_PEAK = 24
-TRANSITION_START_OFFSET = 58  # transition zone starts at peak - TRANSITION_START_OFFSET
-TRANSITION_END_OFFSET = 30    # transition zone stops at peak - TRANSITION_END_OFFSET (exclusive)
-# Derived: transition zone = [peak - 58, peak - 30) = 29 frames (145ms)
-# 过渡末帧 [peak-44, peak-31], 正例末帧 [peak-22, peak-16]
-# 边界 gap: peak-31 到 peak-22 = 9 帧 (45ms) — 够区分, 不太远
-TRANSITION_NEGATIVES_PER_PEAK = 6  # negative windows sampled from each peak's transition zone
+TRANSITION_START_OFFSET = 50  # transition zone starts at peak - TRANSITION_START_OFFSET
+TRANSITION_END_OFFSET = 14    # transition zone stops at peak-14 (紧贴正例 zone)
+# Derived: transition zone = [peak - 50, peak - 15) = 35 frames (175ms)
+TRANSITION_NEGATIVES_PER_PEAK = 8  # negative windows sampled from each peak's transition zone
 HARD_NEGATIVES_PER_FILE = 80
 SEED = 42
 LABEL_IDS = (1, 2, 3, 4)
@@ -83,6 +81,7 @@ class Recording:
     label: int
     imu_path: Path
     serial_path: Path | None = None  # None → pure-negative recording (no Arduino)
+    switch_pattern: tuple[int, int] | None = None  # explicit switch pattern (lcy format)
 
 
 def parse_int_tuple(text: str) -> tuple[int, ...]:
@@ -171,13 +170,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--balance-classes", action="store_true")
     parser.add_argument("--split-mode", choices=["group", "random"], default="group")
+    parser.add_argument("--no-test", action="store_true",
+                        help="Skip test split; all data goes to train+val (no final test evaluation).")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--val-size", type=float, default=0.20,
                         help="Validation fraction of train+val groups (default: 0.20)")
     parser.add_argument(
         "--val-one-per-class",
         action="store_true",
-        help="Validation: exactly 1 non-switch recording per gesture class. Switch recordings never enter val.",
+        help="Validation: 1 normal recording per gesture class (class 1-4). Switch/rapid recordings never enter val.",
     )
     parser.add_argument("--lr-find", action="store_true",
                         help="Run LR finder before training to pick optimal learning rate")
@@ -185,7 +186,12 @@ def parse_args() -> argparse.Namespace:
                         choices=["auto", "cpu", "cuda"],
                         help="Training device (default: auto-detect GPU)")
     parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--save-windows", action="store_true")
+    parser.add_argument("--save-windows", action="store_true",
+                        help="Save sliced (X, y, groups) arrays under work-dir/windows/ for reuse.")
+    parser.add_argument("--load-sliced", type=str, default=None, metavar="DIR",
+                        help="Load pre-sliced X/y/groups from DIR (skip decrypt+process+slice).")
+    parser.add_argument("--slice-only", action="store_true",
+                        help="Stop after slicing; do not train. Implies --save-windows.")
     parser.add_argument(
         "--keep-decrypted",
         action="store_true",
@@ -730,7 +736,7 @@ def build_dataset(
         pos = positive_windows(feature_imu, peaks)
         if pos.shape[0] > 0:
             # ── switch 标签交替逻辑 ──
-            switch_pattern = _detect_switch_pattern(recording.user)
+            switch_pattern = recording.switch_pattern or _detect_switch_pattern(recording.user)
             if switch_pattern is not None:
                 a, b = switch_pattern
                 start_label = recording.label
@@ -806,7 +812,7 @@ def build_dataset(
             ),
             "pure_negative": False,
         }
-        switch_pattern = _detect_switch_pattern(recording.user)
+        switch_pattern = recording.switch_pattern or _detect_switch_pattern(recording.user)
         if switch_pattern is not None:
             a, b = switch_pattern
             start_label = recording.label
@@ -839,6 +845,7 @@ def split_by_group(
     test_size: float,
     val_size: float = 0.20,
     val_one_per_class: bool = False,
+    no_test: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     unique_groups, group_indices = np.unique(groups, return_inverse=True)
     group_labels = []
@@ -847,12 +854,29 @@ def split_by_group(
         positives = labels[labels > 0]
         group_labels.append(int(positives[0]) if positives.size else 0)
     group_labels = np.asarray(group_labels, dtype=np.int64)
-    train_val_groups, test_groups = train_test_split(
-        unique_groups,
-        test_size=test_size,
-        stratify=group_labels,
-        random_state=seed,
-    )
+
+    # ── rapid / switch 组强制进入训练集 ──
+    is_rare = np.array(["rapid" in str(g).lower() or "switch" in str(g).lower()
+                         for g in unique_groups], dtype=bool)
+    rare_groups = unique_groups[is_rare]
+    normal_groups = unique_groups[~is_rare]
+    normal_labels = group_labels[~is_rare]
+
+    if not no_test and len(normal_groups) < 2:
+        raise ValueError("正常录制组不足，无法划分 train/val/test")
+
+    if no_test:
+        test_groups = np.array([], dtype=normal_groups.dtype)
+        train_val_groups = normal_groups
+    else:
+        train_val_groups, test_groups = train_test_split(
+            normal_groups,
+            test_size=test_size,
+            stratify=normal_labels,
+            random_state=seed,
+        )
+    # rapid/switch 全部加入训练集
+    train_val_groups = np.concatenate([train_val_groups, rare_groups])
     train_val_labels = np.array(
         [group_labels[np.where(unique_groups == group)[0][0]] for group in train_val_groups]
     )
@@ -862,48 +886,47 @@ def split_by_group(
     n_val = max(n_classes, int(val_size * len(train_val_groups)))
 
     if val_one_per_class:
-        # ── 每类抽 1 个非 switch 录制进验证集，switch 录制不进入验证集 ──
+        # ── 每类抽 2 个非 switch/rapid 录制进验证集 ──
         rng = np.random.default_rng(seed)
         val_groups_list: list = []
         train_groups_list: list = list(train_val_groups)
 
-        # 1) 为 1-3 类各选 1 个非 switch group，class 4 数据少跳过
-        val_labels_picked: set[int] = set()
+        val_per_class = 1
         for label in sorted(label_counts.keys()):
             if label == 0:
                 continue
-            if label == 4:
-                continue  # class 4 样本太少，不进入验证集
             class_mask = (train_val_labels == label)
             class_groups = train_val_groups[class_mask].tolist()
-            non_switch = [g for g in class_groups if "switch" not in str(g).lower()]
-            if non_switch:
-                chosen = rng.choice(non_switch, size=1, replace=False)[0]
-                val_groups_list.append(chosen)
-                train_groups_list.remove(chosen)
-                val_labels_picked.add(label)
+            non_rare = [g for g in class_groups
+                        if "switch" not in str(g).lower() and "rapid" not in str(g).lower()]
+            n_pick = min(val_per_class, len(non_rare))
+            if n_pick > 0:
+                chosen = rng.choice(non_rare, size=n_pick, replace=False).tolist()
+                val_groups_list.extend(chosen)
+                for g in chosen:
+                    train_groups_list.remove(g)
+            if len(non_rare) < val_per_class:
+                print(f"  ⚠ class {label}: only {len(non_rare)} non-rare group(s), wanted {val_per_class}")
 
-        # 2) 为补足目标数，从 1-3 类再随机抽 1 个非 switch（代替 class 4）
+        # 若仍不足 n_val，从剩余非 rare 组补抽
         n_extra = max(0, n_val - len(val_groups_list))
         if n_extra > 0:
             extra_pool = [
                 g for g in train_groups_list
-                if "switch" not in str(g).lower()
-                and int(group_labels[np.where(unique_groups == g)[0][0]]) in (1, 2, 3)
+                if "switch" not in str(g).lower() and "rapid" not in str(g).lower()
             ]
             if extra_pool:
                 extra = rng.choice(extra_pool, size=min(n_extra, len(extra_pool)), replace=False).tolist()
                 val_groups_list.extend(extra)
                 for g in extra:
                     train_groups_list.remove(g)
-                    val_labels_picked.add(int(group_labels[np.where(unique_groups == g)[0][0]]))
 
         train_groups = np.array(train_groups_list)
         val_groups = np.array(val_groups_list)
         val_labels = [int(group_labels[np.where(unique_groups == g)[0][0]]) for g in val_groups]
         val_covered = len(set(val_labels))
         switch_val = sum(1 for g in val_groups if "switch" in str(g).lower())
-        print(f"  Val split: one-per-class (non-switch), {len(val_groups)} groups covering {val_covered}/{n_classes} classes, switch in val: {switch_val}")
+        print(f"  Val split: {val_per_class}-per-class (non-switch/rapid), {len(val_groups)} groups covering {val_covered}/{n_classes} classes, switch in val: {switch_val}")
 
     else:
         try:
@@ -919,21 +942,22 @@ def split_by_group(
             val_groups_list = []
             train_groups_list = list(train_val_groups)
             for label in sorted(label_counts.keys()):
-                # 找该类别的所有 group
                 class_mask = train_val_labels == label
                 class_groups = train_val_groups[class_mask].tolist()
-                if len(class_groups) >= 2:
-                    # 随机选 1 个进验证集
-                    chosen = rng.choice(class_groups, size=1, replace=False)[0]
+                # 排除 rapid/switch
+                non_rare = [g for g in class_groups
+                            if "switch" not in str(g).lower() and "rapid" not in str(g).lower()]
+                if len(non_rare) >= 2:
+                    chosen = rng.choice(non_rare, size=1, replace=False)[0]
                     val_groups_list.append(chosen)
                     train_groups_list.remove(chosen)
-            # 如果还没达到目标验证集大小，从 train 随机补充
             n_extra = n_val - len(val_groups_list)
             if n_extra > 0 and len(train_groups_list) > 0:
-                extra = rng.choice(train_groups_list, size=min(n_extra, len(train_groups_list)), replace=False).tolist()
-                val_groups_list.extend(extra)
-                for g in extra:
-                    train_groups_list.remove(g)
+                extra_pool = [g for g in train_groups_list
+                              if "switch" not in str(g).lower() and "rapid" not in str(g).lower()]
+                extra = rng.choice(extra_pool or train_groups_list,
+                                   size=min(n_extra, len(extra_pool or train_groups_list)),
+                                   replace=False).tolist()
             train_groups = np.array(train_groups_list)
             val_groups = np.array(val_groups_list)
             val_labels = [label_counts[l] for l in [int(group_labels[np.where(unique_groups == g)[0][0]]) for g in val_groups]]
@@ -958,14 +982,19 @@ def split_random(
     groups: np.ndarray,
     seed: int,
     test_size: float,
+    no_test: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     indices = np.arange(y.shape[0])
-    train_val_idx, test_idx = train_test_split(
-        indices,
-        test_size=test_size,
-        stratify=y,
-        random_state=seed,
-    )
+    if no_test:
+        train_val_idx = indices
+        test_idx = np.array([], dtype=int)
+    else:
+        train_val_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_size,
+            stratify=y,
+            random_state=seed,
+        )
     train_idx, val_idx = train_test_split(
         train_val_idx,
         test_size=test_size,
@@ -1092,6 +1121,7 @@ def train_model(
     lr_find: bool = False,
     device_str: str = "auto",
     time_weight_pooling: bool = False,
+    no_test: bool = False,
 ) -> dict:
     set_seed(seed)
 
@@ -1111,21 +1141,12 @@ def train_model(
 
     if split_mode == "random":
         x_train, y_train, x_val, y_val, x_test, y_test, split_info = split_random(
-            x,
-            y,
-            groups,
-            seed,
-            test_size,
+            x, y, groups, seed, test_size, no_test=no_test,
         )
     else:
         x_train, y_train, x_val, y_val, x_test, y_test, split_info = split_by_group(
-            x,
-            y,
-            groups,
-            seed,
-            test_size,
-            val_size,
-            val_one_per_class=val_one_per_class,
+            x, y, groups, seed, test_size, val_size,
+            val_one_per_class=val_one_per_class, no_test=no_test,
         )
     x_train, x_val, x_test, stats = standardize_channel_groups(
         x_train,
@@ -1225,7 +1246,7 @@ def train_model(
         },
         "test_label_counts": {
             str(label): int(count) for label, count in zip(*np.unique(y_test, return_counts=True))
-        },
+        } if len(y_test) > 0 else {},
         "standardize_mode": "channel_groups",
         "standardize_stats": stats,
         "feature_mode": feature_mode,
@@ -1243,7 +1264,7 @@ def train_model(
         "epochs": epochs,
         "best_valid_loss": float(min(row[1] for row in learn.recorder.values)),
         "best_val_accuracy": float(max(row[2] for row in learn.recorder.values)),
-        "test_metrics": evaluate(learn.model.eval(), x_test, y_test),
+        "test_metrics": evaluate(learn.model.eval(), x_test, y_test) if len(y_test) > 0 else {},
     }
     eval_path = checkpoint_dir / f"{run_name}_eval.json"
     eval_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1274,64 +1295,94 @@ def main() -> int:
     analysis_dir = Path(args.analysis_dir).expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    decrypted_dir = decrypt_dataset(data_dir, work_dir, args.keep_decrypted)
-    source_filter = parse_source_filter(args.source_filter) if args.source_filter else None
-    recordings, skipped = collect_recordings(
-        decrypted_dir,
-        LABEL_IDS,
-        source_filter=source_filter,
-        latest_per_source=args.latest_per_source,
-    )
-    if args.no_switch:
-        before = len(recordings)
-        recordings = [r for r in recordings if "switch" not in r.user.lower()]
-        skipped.append({"reason": f"--no-switch excluded {before - len(recordings)} switch recording(s)"})
-
-    if args.no_pure_negative:
-        before = len(recordings)
-        recordings = [r for r in recordings if r.serial_path is not None]
-        skipped.append({"reason": f"--no-pure-negative excluded {before - len(recordings)} pure-negative recording(s)"})
-
-    if len(recordings) < max(2, len(LABEL_IDS)):
-        raise SystemExit(f"Too few labeled recordings found: {len(recordings)}")
-
-    x, y, groups, dataset_summary = build_dataset(
-        recordings,
-        work_dir,
-        seed=args.seed,
-        hard_negatives_per_file=args.hard_negatives_per_file,
-        serial_edge=args.serial_edge,
-        feature_mode=args.feature_mode,
-        transition_negatives_per_peak=args.transition_negatives_per_peak,
-        use_peak_exclusion=args.use_peak_exclusion,
-    )
-    balance_info = {"enabled": False}
-    if args.balance_classes:
-        x, y, groups, balance_info = balance_classes(x, y, groups, args.seed)
-    dataset_summary["skipped_files"] = skipped
-    dataset_summary["recording_count"] = len(recordings)
-    dataset_summary["selected_recordings"] = [
-        {
-            "stamp": recording.stamp,
-            "user": recording.user,
-            "label": recording.label,
-            "imu_file": recording.imu_path.name,
-            "serial_file": recording.serial_path.name if recording.serial_path else None,
+    # ── 分步模式: 加载预切片数据 ──
+    dataset_summary: dict = {}
+    if args.load_sliced:
+        sliced_dir = Path(args.load_sliced).expanduser().resolve()
+        x_candidates = sorted(sliced_dir.glob("*_x.npy"))
+        y_candidates = sorted(sliced_dir.glob("*_y.npy"))
+        g_candidates = sorted(sliced_dir.glob("*_groups.npy"))
+        if not x_candidates:
+            raise SystemExit(f"No *_x.npy found in: {sliced_dir}")
+        if len(x_candidates) > 1:
+            raise SystemExit(f"Multiple *_x.npy files found in {sliced_dir}: {[p.name for p in x_candidates]}")
+        x_path = x_candidates[0]
+        y_path = y_candidates[0] if y_candidates else sliced_dir / x_path.name.replace("_x.npy", "_y.npy")
+        groups_path = g_candidates[0] if g_candidates else sliced_dir / x_path.name.replace("_x.npy", "_groups.npy")
+        print(f"加载预切片数据: {x_path.name} (from {sliced_dir})")
+        x = np.load(x_path)
+        y = np.load(y_path)
+        groups = np.load(groups_path)
+        print(f"  X: {x.shape}, y: {y.shape}, groups: {len(groups)}")
+        dataset_summary = {"source": "pre-sliced", "sliced_dir": str(sliced_dir)}
+        balance_info = {"enabled": False}
+        if args.balance_classes:
+            x, y, groups, balance_info = balance_classes(x, y, groups, args.seed)
+        dataset_summary["balance_classes"] = balance_info
+        dataset_summary["balanced_x_shape"] = list(x.shape)
+        dataset_summary["balanced_label_counts"] = {
+            str(label): int(count) for label, count in zip(*np.unique(y, return_counts=True))
         }
-        for recording in recordings
-    ]
-    dataset_summary["hard_negatives_per_file"] = args.hard_negatives_per_file
-    dataset_summary["label_ids"] = list(LABEL_IDS)
-    dataset_summary["source_filter"] = sorted([f"{user}_{label}" for user, label in source_filter]) if source_filter else []
-    dataset_summary["latest_per_source"] = bool(args.latest_per_source)
-    dataset_summary["label_last_digit"] = bool(args.label_last_digit)
-    dataset_summary["balance_classes"] = balance_info
-    dataset_summary["balanced_x_shape"] = list(x.shape)
-    dataset_summary["balanced_label_counts"] = {
-        str(label): int(count) for label, count in zip(*np.unique(y, return_counts=True))
-    }
+    else:
+        # ── 全量处理 ──
+        decrypted_dir = decrypt_dataset(data_dir, work_dir, args.keep_decrypted)
+        source_filter = parse_source_filter(args.source_filter) if args.source_filter else None
+        recordings, skipped = collect_recordings(
+            decrypted_dir,
+            LABEL_IDS,
+            source_filter=source_filter,
+            latest_per_source=args.latest_per_source,
+        )
+        if args.no_switch:
+            before = len(recordings)
+            recordings = [r for r in recordings if "switch" not in r.user.lower()]
+            skipped.append({"reason": f"--no-switch excluded {before - len(recordings)} switch recording(s)"})
 
-    if args.save_windows:
+        if args.no_pure_negative:
+            before = len(recordings)
+            recordings = [r for r in recordings if r.serial_path is not None]
+            skipped.append({"reason": f"--no-pure-negative excluded {before - len(recordings)} pure-negative recording(s)"})
+
+        if len(recordings) < max(2, len(LABEL_IDS)):
+            raise SystemExit(f"Too few labeled recordings found: {len(recordings)}")
+
+        x, y, groups, dataset_summary = build_dataset(
+            recordings,
+            work_dir,
+            seed=args.seed,
+            hard_negatives_per_file=args.hard_negatives_per_file,
+            serial_edge=args.serial_edge,
+            feature_mode=args.feature_mode,
+            transition_negatives_per_peak=args.transition_negatives_per_peak,
+            use_peak_exclusion=args.use_peak_exclusion,
+        )
+        balance_info = {"enabled": False}
+        if args.balance_classes:
+            x, y, groups, balance_info = balance_classes(x, y, groups, args.seed)
+        dataset_summary["skipped_files"] = skipped
+        dataset_summary["recording_count"] = len(recordings)
+        dataset_summary["selected_recordings"] = [
+            {
+                "stamp": recording.stamp,
+                "user": recording.user,
+                "label": recording.label,
+                "imu_file": recording.imu_path.name,
+                "serial_file": recording.serial_path.name if recording.serial_path else None,
+            }
+            for recording in recordings
+        ]
+        dataset_summary["hard_negatives_per_file"] = args.hard_negatives_per_file
+        dataset_summary["label_ids"] = list(LABEL_IDS)
+        dataset_summary["source_filter"] = sorted([f"{user}_{label}" for user, label in source_filter]) if source_filter else []
+        dataset_summary["latest_per_source"] = bool(args.latest_per_source)
+        dataset_summary["label_last_digit"] = bool(args.label_last_digit)
+        dataset_summary["balance_classes"] = balance_info
+        dataset_summary["balanced_x_shape"] = list(x.shape)
+        dataset_summary["balanced_label_counts"] = {
+            str(label): int(count) for label, count in zip(*np.unique(y, return_counts=True))
+        }
+
+    if args.save_windows or args.slice_only:
         windows_dir = work_dir / "windows"
         windows_dir.mkdir(parents=True, exist_ok=True)
         np.save(windows_dir / f"{args.run_name}_x.npy", x)
@@ -1342,11 +1393,16 @@ def main() -> int:
             "y": str(windows_dir / f"{args.run_name}_y.npy"),
             "groups": str(windows_dir / f"{args.run_name}_groups.npy"),
         }
+        print(f"切片已保存: {windows_dir}")
 
     analysis_dir.mkdir(exist_ok=True)
     dataset_path = analysis_dir / f"{args.run_name}_dataset_summary.json"
     dataset_path.write_text(json.dumps(dataset_summary, ensure_ascii=False, indent=2))
     print(json.dumps(dataset_summary, ensure_ascii=False, indent=2))
+
+    if args.slice_only:
+        print("--slice-only 模式: 切片完成, 退出。")
+        return 0
 
     train_summary = train_model(
         x,
@@ -1371,6 +1427,7 @@ def main() -> int:
         lr_find=args.lr_find,
         device_str=args.device,
         time_weight_pooling=bool(args.time_weight_pooling),
+        no_test=args.no_test,
     )
     print(json.dumps(train_summary, ensure_ascii=False, indent=2))
     return 0

@@ -1,0 +1,19 @@
+{
+  "source": "pre-sliced",
+  "sliced_dir": "C:\\Users\\HP\\Desktop\\drumÏîÄ¿\\drum-ring\\my_sliced_data_v7",
+  "balance_classes": {
+    "enabled": false
+  },
+  "balanced_x_shape": [
+    101390,
+    17,
+    15
+  ],
+  "balanced_label_counts": {
+    "0": 62504,
+    "1": 13722,
+    "2": 10068,
+    "3": 9054,
+    "4": 6042
+  }
+}

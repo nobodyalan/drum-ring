@@ -1,0 +1,38 @@
+# Sliced data caches
+my_sliced_data*/
+my_sliced_lcy*/
+
+# Processing artifacts
+data_simulate/
+data_processed_local_drum_gesture/
+
+# Zipped new data
+data/newdatas/*.zip
+
+# macOS metadata
+__MACOSX/
+._*
+
+# Generated audio (root level only)
+/*.wav
+
+# Generated images (root level only)
+/*.png
+/*.jpg
+
+# Generated JSON (project root only)
+*.json
+!analysis_outputs/*.json
+!project.yml
+!package.json
+!pyproject.toml
+!tsconfig.json
+
+# Temporary scripts
+_check_*.py
+_analyze_*.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

@@ -14,7 +14,7 @@ DEFAULT_CHECKPOINT_PATH = (
     PROJECT_ROOT
     / "checkpoint"
     / "drum_gesture"
-    / "w15-17ch-zone22-group-v4p.pth"
+    / "my_v6.pth"
 )
 
 WINDOW_SIZE = 15

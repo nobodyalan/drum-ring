@@ -1,0 +1,203 @@
+{
+  "run_name": "sliced_w15_rawlin12_handcrafted",
+  "checkpoint_path": "C:\\Users\\HP\\Desktop\\drum项目\\drum-ring\\checkpoint\\drum_gesture\\sliced_w15_rawlin12_handcrafted.pth",
+  "classes": {
+    "0": "negative",
+    "1": "gesture_1",
+    "2": "gesture_2",
+    "3": "gesture_3",
+    "4": "gesture_4"
+  },
+  "split_info": {
+    "mode": "group_stratified",
+    "test_size": 0.25,
+    "train_groups": [
+      "lqw_1783342896_2",
+      "lqw_1783432441_1",
+      "whr_1783344691_2",
+      "whrnew_1784620143_4",
+      "whrnewswitch12_1784620467_1",
+      "whrnewswitch12_1784620467_switch12",
+      "whrnewswitch13_1784620918_1",
+      "whrswitch12_1784204166_1",
+      "whrswitch12_1784204166_switch12",
+      "whrswitch13_1784204358_switch13",
+      "whrswitch23_1784209912_2",
+      "whrswitch23_1784209912_switch23",
+      "wxt_1783435685_1",
+      "zhy_1783343401_1",
+      "zhy_1783343599_3",
+      "zhy_1783343717_4"
+    ],
+    "val_groups": [
+      "lqw_1783342975_3",
+      "lqw_1783343103_3",
+      "whr_1783344879_3",
+      "whrnew_1784203658_1",
+      "zhy_1783343503_2"
+    ],
+    "test_groups": [
+      "lqw_1783343136_4",
+      "whr_1783344510_1",
+      "whrnew_1784203850_2",
+      "whrnew_1784203999_3",
+      "whrnewswitch13_1784620918_switch13",
+      "whrswitch12_1784210265_1",
+      "whrswitch12_1784210265_switch12",
+      "whrswitch13_1784204358_1"
+    ]
+  },
+  "train_size": 36195,
+  "val_size": 12490,
+  "test_size": 18720,
+  "train_label_counts": {
+    "0": 19752,
+    "1": 6153,
+    "2": 4683,
+    "3": 2807,
+    "4": 2800
+  },
+  "val_label_counts": {
+    "0": 6848,
+    "1": 1414,
+    "2": 1407,
+    "3": 2821
+  },
+  "test_label_counts": {
+    "0": 10208,
+    "1": 2814,
+    "2": 2128,
+    "3": 2107,
+    "4": 1463
+  },
+  "standardize_mode": "channel_groups",
+  "standardize_stats": {
+    "mode": "channel_groups",
+    "feature_mode": "rawlin12_handcrafted",
+    "raw_acc_mean": -0.23629364371299744,
+    "raw_acc_std": 5.353999137878418,
+    "raw_gyro_mean": -0.2097601592540741,
+    "raw_gyro_std": 2.065014123916626,
+    "linear_acc_mean": 2.873798131942749,
+    "linear_acc_std": 6.291128635406494,
+    "raw_acc_norm_mean": 7.021363735198975,
+    "raw_acc_norm_std": 6.071563243865967,
+    "linear_acc_norm_mean": 10.23249340057373,
+    "linear_acc_norm_std": 6.229535102844238,
+    "raw_gyro_norm_mean": 2.8354644775390625,
+    "raw_gyro_norm_std": 2.2102010250091553,
+    "raw_acc_delta_norm_mean": 1.0115966796875,
+    "raw_acc_delta_norm_std": 3.2916712760925293,
+    "linear_acc_delta_norm_mean": 0.9798435568809509,
+    "linear_acc_delta_norm_std": 3.28691029548645,
+    "gyro_delta_norm_mean": 0.34506651759147644,
+    "gyro_delta_norm_std": 0.535845160484314,
+    "raw_linear_dot_mean": 66.71917724609375,
+    "raw_linear_dot_std": 573.6427612304688,
+    "raw_linear_cos_mean": 0.16873778402805328,
+    "raw_linear_cos_std": 0.6765863299369812
+  },
+  "feature_mode": "rawlin12_handcrafted",
+  "model": "RegularizedInceptionTime",
+  "model_head": "weighted",
+  "input_shape": [
+    17,
+    15
+  ],
+  "loss": "label_smoothing",
+  "label_smoothing": 0.05,
+  "wd": 0.01,
+  "gaussian_noise": 0.05,
+  "input_dropout": 0.1,
+  "cutout": 0.1,
+  "batch_size": 16,
+  "lr": 0.001,
+  "epochs": 40,
+  "best_valid_loss": 0.3870783746242523,
+  "best_val_accuracy": 0.9378703236579895,
+  "test_metrics": {
+    "accuracy": 0.9659188034188034,
+    "confusion_matrix": [
+      [
+        9830,
+        31,
+        21,
+        322,
+        4
+      ],
+      [
+        62,
+        2751,
+        0,
+        1,
+        0
+      ],
+      [
+        20,
+        3,
+        2105,
+        0,
+        0
+      ],
+      [
+        22,
+        0,
+        0,
+        2085,
+        0
+      ],
+      [
+        149,
+        3,
+        0,
+        0,
+        1311
+      ]
+    ],
+    "report": {
+      "0": {
+        "precision": 0.9749082614301299,
+        "recall": 0.9629702194357367,
+        "f1-score": 0.9689024690749594,
+        "support": 10208.0
+      },
+      "1": {
+        "precision": 0.986728837876614,
+        "recall": 0.9776119402985075,
+        "f1-score": 0.9821492324169939,
+        "support": 2814.0
+      },
+      "2": {
+        "precision": 0.9901222953904045,
+        "recall": 0.9891917293233082,
+        "f1-score": 0.9896567936060179,
+        "support": 2128.0
+      },
+      "3": {
+        "precision": 0.8658637873754153,
+        "recall": 0.9895586141433318,
+        "f1-score": 0.9235880398671097,
+        "support": 2107.0
+      },
+      "4": {
+        "precision": 0.996958174904943,
+        "recall": 0.8961038961038961,
+        "f1-score": 0.9438444924406048,
+        "support": 1463.0
+      },
+      "accuracy": 0.9659188034188034,
+      "macro avg": {
+        "precision": 0.9629162713955013,
+        "recall": 0.9630872798609561,
+        "f1-score": 0.9616282054811371,
+        "support": 18720.0
+      },
+      "weighted avg": {
+        "precision": 0.9678645051784333,
+        "recall": 0.9659188034188034,
+        "f1-score": 0.9661943639729069,
+        "support": 18720.0
+      }
+    }
+  }
+}

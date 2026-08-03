@@ -53,19 +53,51 @@ DEFAULT_MODEL_PATH = (
     PROJECT_ROOT
     / "checkpoint"
     / "drum_gesture"
-    / "w15-17ch-zone22-group-v4p.pth"
+    / "my_v10.pth"
 )
 MODEL_OPTIONS = [
     (
-        "v3p w15-17ch-zone22 (best acc 94.2%, low augment)",
+        "v10 no-test all data (val acc 89.9%, all 47 groups)",
         PROJECT_ROOT
         / "checkpoint"
         / "drum_gesture"
-        / "w15-17ch-zone22-group-v3p.pth",
+        / "my_v10.pth",
         15,
     ),
     (
-        "v4p w15-17ch-zone22 (acc 90.8%, high augment anti-overfit)",
+        "v9 switch labels fixed (test acc 91.3%, switch13 perfect)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "my_v9.pth",
+        15,
+    ),
+    (
+        "v8 1-per-class val (test acc 92.9%, balanced)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "my_v8.pth",
+        15,
+    ),
+    (
+        "v6 zone14-4 rapid+switch (acc 91.8%, 55K samples)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "my_v6.pth",
+        15,
+    ),
+    (
+        "v5p sliced_w15_rawlin12 (acc 96.6%, zone 22-16)",
+        PROJECT_ROOT
+        / "checkpoint"
+        / "drum_gesture"
+        / "sliced_w15_rawlin12_handcrafted.pth",
+        15,
+    ),
+    (
+        "v4p w15-17ch-zone22 (acc 90.8%)",
         PROJECT_ROOT
         / "checkpoint"
         / "drum_gesture"

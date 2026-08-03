@@ -414,7 +414,8 @@ def _write_wav(filepath: Path, audio: np.ndarray, sample_rate: int) -> None:
 def _find_default_model() -> Path:
     """查找默认模型 checkpoint。"""
     candidates = [
-        _PROJECT_ROOT / "checkpoint" / "drum_gesture" / "w15-17ch-zone22-group-v4p.pth",
+        _PROJECT_ROOT / "checkpoint" / "drum_gesture" / "my_v10.pth",
+        _PROJECT_ROOT / "checkpoint" / "drum_gesture" / "my_v9.pth",
     ]
     for path in candidates:
         if path.exists():

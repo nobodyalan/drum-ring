@@ -1,0 +1,222 @@
+{
+  "run_name": "my_v8",
+  "checkpoint_path": "C:\\Users\\HP\\Desktop\\drum项目\\drum-ring\\checkpoint\\drum_gesture\\my_v8.pth",
+  "classes": {
+    "0": "negative",
+    "1": "gesture_1",
+    "2": "gesture_2",
+    "3": "gesture_3",
+    "4": "gesture_4"
+  },
+  "split_info": {
+    "mode": "group_stratified",
+    "test_size": 0.25,
+    "train_groups": [
+      "lqw_1783342896_2",
+      "lqw_1783342975_3",
+      "whr100switch23_1785590442_2",
+      "whr100switch23_1785590442_switch23",
+      "whr12switch100_1785575137_1",
+      "whr12switch100_1785575137_switch10",
+      "whr13switch100_1785575221_1",
+      "whr13switch100_1785575221_switch10",
+      "whr14switch100_1785575295_1",
+      "whr14switch100_1785575295_switch10",
+      "whr1rapid100_1785501816_1",
+      "whr1rapid150_1785501893_1",
+      "whr24switch100_1785592662_2",
+      "whr24switch100_1785592662_switch10",
+      "whr2rapid100_1785500292_2",
+      "whr2rapid150_1785500441_2",
+      "whr34switch100_1785593273_3",
+      "whr34switch100_1785593273_switch10",
+      "whr3rapid100_1785502241_3",
+      "whr3rapid150_1785502153_3",
+      "whr4rapid100_1785502406_4",
+      "whr4rapid150_1785502492_4",
+      "whrnew_1784620143_4",
+      "whrnewswitch12_1784620467_1",
+      "whrnewswitch12_1784620467_switch12",
+      "whrswitch12_1784204166_1",
+      "whrswitch12_1784204166_switch12",
+      "whrswitch12_1784210265_1",
+      "whrswitch12_1784210265_switch12",
+      "whrswitch13_1784204358_1",
+      "whrswitch13_1784204358_switch13",
+      "whrswitch23_1784209912_2",
+      "whrswitch23_1784209912_switch23",
+      "zhy_1783343599_3"
+    ],
+    "val_groups": [
+      "lqw_1783343136_4",
+      "whr_1783344510_1",
+      "whr_1783344691_2",
+      "whr_1783344879_3",
+      "whrnew_1784203658_1",
+      "whrnew_1784203850_2",
+      "whrnew_1784203999_3",
+      "zhy_1783343401_1"
+    ],
+    "test_groups": [
+      "lqw_1783343103_3",
+      "lqw_1783432441_1",
+      "wxt_1783435685_1",
+      "zhy_1783343503_2",
+      "zhy_1783343717_4"
+    ]
+  },
+  "train_size": 66490,
+  "val_size": 23060,
+  "test_size": 11840,
+  "train_label_counts": {
+    "0": 42004,
+    "1": 7824,
+    "2": 6624,
+    "3": 6450,
+    "4": 3588
+  },
+  "val_label_counts": {
+    "0": 13520,
+    "1": 3630,
+    "2": 2238,
+    "3": 2418,
+    "4": 1254
+  },
+  "test_label_counts": {
+    "0": 6980,
+    "1": 2268,
+    "2": 1206,
+    "3": 186,
+    "4": 1200
+  },
+  "standardize_mode": "channel_groups",
+  "standardize_stats": {
+    "mode": "channel_groups",
+    "feature_mode": "rawlin12_handcrafted",
+    "raw_acc_mean": 0.6682634353637695,
+    "raw_acc_std": 14.995085716247559,
+    "raw_gyro_mean": 0.057194069027900696,
+    "raw_gyro_std": 4.249189853668213,
+    "linear_acc_mean": 1.8405791521072388,
+    "linear_acc_std": 15.43095588684082,
+    "raw_acc_norm_mean": 17.58696746826172,
+    "raw_acc_norm_std": 19.146697998046875,
+    "linear_acc_norm_mean": 18.98797035217285,
+    "linear_acc_norm_std": 19.077823638916016,
+    "raw_gyro_norm_mean": 5.906060695648193,
+    "raw_gyro_norm_std": 4.392618179321289,
+    "raw_acc_delta_norm_mean": 4.948945999145508,
+    "raw_acc_delta_norm_std": 14.434342384338379,
+    "linear_acc_delta_norm_mean": 5.011559963226318,
+    "linear_acc_delta_norm_std": 14.461999893188477,
+    "gyro_delta_norm_mean": 1.211596965789795,
+    "gyro_delta_norm_std": 2.259289503097534,
+    "raw_linear_dot_mean": 652.083984375,
+    "raw_linear_dot_std": 2586.809814453125,
+    "raw_linear_cos_mean": 0.5225367546081543,
+    "raw_linear_cos_std": 0.5726867914199829
+  },
+  "feature_mode": "rawlin12_handcrafted",
+  "model": "RegularizedInceptionTime",
+  "model_head": "weighted",
+  "input_shape": [
+    17,
+    15
+  ],
+  "loss": "label_smoothing",
+  "label_smoothing": 0.05,
+  "wd": 0.01,
+  "gaussian_noise": 0.05,
+  "input_dropout": 0.1,
+  "cutout": 0.1,
+  "batch_size": 16,
+  "lr": 0.001,
+  "epochs": 40,
+  "best_valid_loss": 0.35330861806869507,
+  "best_val_accuracy": 0.943278431892395,
+  "test_metrics": {
+    "accuracy": 0.9294763513513513,
+    "confusion_matrix": [
+      [
+        6459,
+        248,
+        147,
+        10,
+        116
+      ],
+      [
+        27,
+        2114,
+        124,
+        3,
+        0
+      ],
+      [
+        64,
+        14,
+        1128,
+        0,
+        0
+      ],
+      [
+        21,
+        0,
+        0,
+        165,
+        0
+      ],
+      [
+        58,
+        3,
+        0,
+        0,
+        1139
+      ]
+    ],
+    "report": {
+      "0": {
+        "precision": 0.9743551063508825,
+        "recall": 0.9253581661891117,
+        "f1-score": 0.9492247777206261,
+        "support": 6980.0
+      },
+      "1": {
+        "precision": 0.8886086591004624,
+        "recall": 0.9320987654320988,
+        "f1-score": 0.9098343017000216,
+        "support": 2268.0
+      },
+      "2": {
+        "precision": 0.806290207290922,
+        "recall": 0.9353233830845771,
+        "f1-score": 0.8660268714011516,
+        "support": 1206.0
+      },
+      "3": {
+        "precision": 0.9269662921348315,
+        "recall": 0.8870967741935484,
+        "f1-score": 0.9065934065934066,
+        "support": 186.0
+      },
+      "4": {
+        "precision": 0.9075697211155378,
+        "recall": 0.9491666666666667,
+        "f1-score": 0.9279022403258655,
+        "support": 1200.0
+      },
+      "accuracy": 0.9294763513513513,
+      "macro avg": {
+        "precision": 0.9007579971985272,
+        "recall": 0.9258087511132004,
+        "f1-score": 0.9119163195482143,
+        "support": 11840.0
+      },
+      "weighted avg": {
+        "precision": 0.9332980124018231,
+        "recall": 0.9294763513513513,
+        "f1-score": 0.93037420723588,
+        "support": 11840.0
+      }
+    }
+  }
+}
