@@ -49,10 +49,12 @@ final class SensorManager {
 
     /// 启动传感器，以指定频率采集
     /// - Parameter hz: 目标频率，默认 200Hz
-    func start(hz: Double = 200) {
+    /// - Returns: true 如果成功启动
+    @discardableResult
+    func start(hz: Double = 200) -> Bool {
         guard motion.isDeviceMotionAvailable else {
             print("[SensorManager] ❌ DeviceMotion 不可用 (模拟器?)")
-            return
+            return false
         }
 
         motion.deviceMotionUpdateInterval = 1.0 / hz
@@ -88,6 +90,7 @@ final class SensorManager {
 
         print("[SensorManager] ✅ 已启动, 目标 \(Int(hz))Hz, "
               + "间隔 \(String(format: "%.1f", 1000.0/hz))ms")
+        return true
     }
 
     func stop() {

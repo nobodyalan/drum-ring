@@ -16,6 +16,7 @@ final class OSCSender {
     // MARK: - Public
 
     /// 配置目标地址，成功返回 true
+    /// 使用 inet_pton 直接解析 IP（无需 DNS，不阻塞主线程）
     func configure(host: String, port: UInt16) -> Bool {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -27,28 +28,14 @@ final class OSCSender {
         sock = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
         guard sock >= 0 else { return false }
 
-        // 解析主机名
-        var hint = addrinfo(
-            ai_flags: 0,
-            ai_family: AF_INET,
-            ai_socktype: SOCK_DGRAM,
-            ai_protocol: IPPROTO_UDP,
-            ai_addrlen: 0,
-            ai_canonname: nil,
-            ai_addr: nil,
-            ai_next: nil
-        )
-        var result: UnsafeMutablePointer<addrinfo>?
-        let portStr = String(port)
-        let status = getaddrinfo(host, portStr, &hint, &result)
-        guard status == 0, let info = result?.pointee else {
+        // 直接用 inet_pton 解析 IP 地址（微秒级，不阻塞）
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        let result = host.withCString { inet_pton(AF_INET, $0, &addr.sin_addr) }
+        guard result == 1 else {
             _close()
             return false
         }
-
-        // 安全复制 sockaddr_in (避免 withMemoryRebound 的 UB)
-        memcpy(&addr, info.ai_addr, Int(info.ai_addrlen))
-        freeaddrinfo(result)
 
         return true
     }

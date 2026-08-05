@@ -30,6 +30,7 @@ struct ContentView: View {
                         Picker("", selection: $vm.targetHz) {
                             Text("60 Hz").tag(60.0)
                             Text("100 Hz").tag(100.0)
+                            Text("150 Hz").tag(150.0)
                             Text("200 Hz").tag(200.0)
                         }
                         .pickerStyle(.segmented)
@@ -156,18 +157,34 @@ final class StreamerViewModel: ObservableObject {
     // MARK: - Actions
 
     func start() {
+        // 1. 校验端口
         guard let portNum = UInt16(port), portNum > 0 else {
             statusText = "端口无效 (1-65535)"
             return
         }
 
-        statusText = "连接中..."
-        guard sender.configure(host: ipAddress, port: portNum) else {
-            statusText = "无法连接 — 检查 IP 和网络"
+        // 2. 快速预检查 IP 格式
+        let octets = ipAddress.split(separator: ".")
+        guard octets.count == 4, octets.allSatisfy({ Int($0) != nil }) else {
+            statusText = "IP 格式无效 (例: 192.168.1.100)"
             return
         }
 
-        // 重置计数器
+        // 3. 配置 UDP socket
+        statusText = "连接中..."
+        guard sender.configure(host: ipAddress, port: portNum) else {
+            statusText = "无法连接 — 检查 IP 和同一 WiFi"
+            return
+        }
+
+        // 4. 启动传感器（必须成功才继续）
+        guard sensor.start(hz: targetHz) else {
+            statusText = "传感器不可用 (真机? 权限?)"
+            sender.close()
+            return
+        }
+
+        // 5. 全部就绪，重置计数器
         frameCounter = 0
         byteCounter = 0
         packetCount = 0
