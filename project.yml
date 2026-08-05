@@ -54,3 +54,43 @@ targets:
 
     # 无需第三方依赖，全部使用 Apple 内置框架
     dependencies: []
+
+  # ═══════════════════════════════════════════════════════════
+  # IMUStreamer — ZigSim 替代: IMU → OSC 实时发送器
+  # ═══════════════════════════════════════════════════════════
+  IMUStreamer:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: ios_develop/IMUStreamer
+        includes:
+          - "*.swift"
+
+    settings:
+      base:
+        INFOPLIST_FILE: ios_develop/IMUStreamer/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.drumhit.imustreamer
+        CODE_SIGN_STYLE: Manual
+        ONLY_ACTIVE_ARCH: "YES"
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+    dependencies: []
+
+# ═══════════════════════════════════════════════════════════
+# Schemes — xcodegen 需要显式声明才能用 xcodebuild -scheme 编译
+# ═══════════════════════════════════════════════════════════
+schemes:
+  DrumHit:
+    build:
+      targets:
+        DrumHit: all
+    run:
+      config: Release
+  IMUStreamer:
+    build:
+      targets:
+        IMUStreamer: all
+    run:
+      config: Release
