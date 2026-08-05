@@ -201,8 +201,8 @@ final class StreamerViewModel: ObservableObject {
             os_unfair_lock_unlock(&self.frameLock)
         }
 
-        // 5. 启动传感器
-        guard sensor.start(hz: targetHz) else {
+        // 5. 启动传感器（原始模式，绕过 CMDeviceMotion 频率限制）
+        guard sensor.startRaw(hz: targetHz) else {
             sensor.onFrame = nil
             sender.close()
             statusText = "传感器不可用 (真机? 权限?)"
@@ -230,7 +230,7 @@ final class StreamerViewModel: ObservableObject {
     }
 
     func stop() {
-        sensor.stop()
+        sensor.stopRaw()
         fpsTimer?.invalidate()
         fpsTimer = nil
         sender.close()

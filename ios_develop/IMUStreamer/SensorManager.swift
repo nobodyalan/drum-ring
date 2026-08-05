@@ -101,4 +101,92 @@ final class SensorManager {
     deinit {
         stop()
     }
-}
+
+    // MARK: - 频率对比测试（临时）
+
+    /// 同时启动原始加速度计，测量实际可达到的采样率
+    func startRawAccelRateTest() {
+        guard motion.isAccelerometerAvailable else {
+            print("[RateTest] ❌ 加速度计不可用")
+            return
+        }
+        motion.accelerometerUpdateInterval = 1.0 / 200.0  // 请求 200Hz
+        var count = 0
+        var t0 = CACurrentMediaTime()
+
+        motion.startAccelerometerUpdates(to: queue) { data, error in
+            count += 1
+            let now = CACurrentMediaTime()
+            if now - t0 >= 1.0 {
+                let rate = Double(count) / (now - t0)
+                print("[RateTest] 原始加速度计: \(count) 帧 = \(Int(rate)) Hz")
+                count = 0
+                t0 = now
+            }
+        }
+        print("[RateTest] ✅ 原始加速度计已启动, 目标 200Hz, 每秒打印实际频率")
+    }
+
+    func stopRawAccelRateTest() {
+        motion.stopAccelerometerUpdates()
+        print("[RateTest] ⏹ 已停止")
+    }
+
+    // MARK: - 原始传感器模式（替代 CMDeviceMotion）
+
+    /// 使用原始加速度计 + 陀螺仪，频率不受 CMDeviceMotion 姿态融合限制
+    /// gravity 从 CMDeviceMotion 以较低频率获取，quaternion 填占位值
+    @discardableResult
+    func startRaw(hz: Double = 200) -> Bool {
+        guard motion.isAccelerometerAvailable, motion.isGyroAvailable else {
+            print("[SensorManager] ❌ 原始传感器不可用")
+            return false
+        }
+
+        motion.accelerometerUpdateInterval = 1.0 / hz
+        motion.gyroUpdateInterval = 1.0 / hz
+
+        // 缓存最新帧的各分量（两个传感器不同步，各取最新值合并）
+        var latestAccelX: Float = 0, latestAccelY: Float = 0, latestAccelZ: Float = 0
+        var latestGyroX: Float = 0, latestGyroY: Float = 0, latestGyroZ: Float = 0
+        let dataLock = os_unfair_lock_s()
+
+        motion.startAccelerometerUpdates(to: queue) { data, _ in
+            guard let d = data else { return }
+            os_unfair_lock_lock(&dataLock)
+            latestAccelX = Float(d.acceleration.x)
+            latestAccelY = Float(d.acceleration.y)
+            latestAccelZ = Float(d.acceleration.z)
+            os_unfair_lock_unlock(&dataLock)
+        }
+
+        // 陀螺仪回调触发帧输出（两者取最新合并）
+        motion.startGyroUpdates(to: queue) { [weak self] data, _ in
+            guard let self, let d = data else { return }
+            os_unfair_lock_lock(&dataLock)
+            latestGyroX = Float(d.rotationRate.x)
+            latestGyroY = Float(d.rotationRate.y)
+            latestGyroZ = Float(d.rotationRate.z)
+            let ax = latestAccelX, ay = latestAccelY, az = latestAccelZ
+            let gx = latestGyroX, gy = latestGyroY, gz = latestGyroZ
+            os_unfair_lock_unlock(&dataLock)
+
+            let frame = IMUFrame(
+                gyroX: gx, gyroY: gy, gyroZ: gz,
+                accelX: ax, accelY: ay, accelZ: az,  // 原始加速度（含重力）
+                quatX: 0, quatY: 0, quatZ: 0, quatW: 1,  // 占位
+                gravityX: 0, gravityY: 0, gravityZ: 0,    // 占位
+                timestamp: d.timestamp
+            )
+            self.onFrame?(frame)
+        }
+
+        print("[SensorManager] ✅ 原始传感器已启动, 目标 \(Int(hz))Hz")
+        return true
+    }
+
+    func stopRaw() {
+        motion.stopAccelerometerUpdates()
+        motion.stopGyroUpdates()
+        print("[SensorManager] ⏹ 原始传感器已停止")
+    }
