@@ -74,7 +74,7 @@ targets:
         CODE_SIGN_STYLE: Manual
         ONLY_ACTIVE_ARCH: "YES"
         SWIFT_VERSION: "5.0"
-        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.1"
 
     dependencies: []
 

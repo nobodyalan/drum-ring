@@ -153,12 +153,18 @@ jobs:
             -project DrumHit.xcodeproj \
             -scheme IMUStreamer \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -configuration Release \
             -derivedDataPath ./DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO | tee build_imu.log
+            ONLY_ACTIVE_ARCH=NO 2>&1 | tee build_imu.log
+          # 检查 xcodebuild 退出码 (tee 管道会吞掉错误码)
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "❌ xcodebuild 编译失败！"
+            exit 1
+          fi
 
           # 找到编译好的 .app
           APP_PATH=$(find ./DerivedData -name "IMUStreamer.app" -type d | head -1)
