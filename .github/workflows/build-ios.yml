@@ -133,10 +133,73 @@ jobs:
           ls -lh DrumHit.ipa
           echo "✅ IPA 生成成功"
 
-      # ── 6. 上传 IPA ──
-      - name: Upload IPA Artifact
+      # ── 6. 上传 DrumHit IPA ──
+      - name: Upload DrumHit IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DrumHit-${{ github.run_number }}
           path: ./DrumHit.ipa
+          retention-days: 30
+
+      # ═══════════════════════════════════════════════════════════
+      # ── 7. 编译 IMUStreamer Target ──
+      # IMUStreamer 无 CoreML 依赖，无需额外资源处理
+      # ═══════════════════════════════════════════════════════════
+      - name: Build IMUStreamer
+        run: |
+          set -e
+
+          xcodebuild build \
+            -project DrumHit.xcodeproj \
+            -scheme IMUStreamer \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO | tee build_imu.log
+
+          # 找到编译好的 .app
+          APP_PATH=$(find ./DerivedData -name "IMUStreamer.app" -type d | head -1)
+          echo "IMUStreamer App 路径: $APP_PATH"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ 未找到 IMUStreamer.app！"
+            exit 1
+          fi
+
+          echo ""
+          echo "========== Info.plist =========="
+          plutil -p "$APP_PATH/Info.plist"
+          echo ""
+          echo "========== .app 内容 =========="
+          ls -la "$APP_PATH/"
+          echo ""
+          if [ -f "$APP_PATH/IMUStreamer" ]; then
+            echo "✅ 可执行文件存在: $(file "$APP_PATH/IMUStreamer")"
+          else
+            echo "❌ 可执行文件 IMUStreamer 缺失！"
+            exit 1
+          fi
+
+          # ad-hoc 签名
+          echo "正在添加 ad-hoc 签名..."
+          codesign --force --sign - --timestamp=none "$APP_PATH"
+          echo "✅ ad-hoc 签名完成"
+
+          # 打包 IPA
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r IMUStreamer.ipa Payload/
+          rm -rf Payload
+          ls -lh IMUStreamer.ipa
+          echo "✅ IMUStreamer IPA 生成成功"
+
+      # ── 8. 上传 IMUStreamer IPA ──
+      - name: Upload IMUStreamer IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IMUStreamer-${{ github.run_number }}
+          path: ./IMUStreamer.ipa
           retention-days: 30
