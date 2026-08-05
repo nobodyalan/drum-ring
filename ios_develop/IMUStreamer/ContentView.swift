@@ -84,6 +84,7 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("IMU Streamer")
+            .onTapGesture { /* 点击空白收起键盘 */ }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if vm.isStreaming {
@@ -157,81 +158,73 @@ final class StreamerViewModel: ObservableObject {
     // MARK: - Actions
 
     func start() {
+        // 0. 先收起键盘（防止 TextField 失焦冲突卡死！）
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+
         // 1. 校验端口
         guard let portNum = UInt16(port), portNum > 0 else {
             statusText = "端口无效 (1-65535)"
             return
         }
 
-        // 2. 快速预检查 IP 格式
+        // 2. 预检查 IP 格式
         let octets = ipAddress.split(separator: ".")
         guard octets.count == 4, octets.allSatisfy({ Int($0) != nil }) else {
             statusText = "IP 格式无效 (例: 192.168.1.100)"
             return
         }
 
-        // 3. 配置 UDP socket
+        // 3. 配置 socket (inet_pton 微秒级，不阻塞)
         statusText = "连接中..."
         guard sender.configure(host: ipAddress, port: portNum) else {
             statusText = "无法连接 — 检查 IP 和同一 WiFi"
             return
         }
 
-        // 4. 启动传感器（必须成功才继续）
-        guard sensor.start(hz: targetHz) else {
-            statusText = "传感器不可用 (真机? 权限?)"
-            sender.close()
-            return
-        }
-
-        // 5. 全部就绪，重置计数器
-        frameCounter = 0
-        byteCounter = 0
-        packetCount = 0
-        byteCount = 0
-        fps = 0
-
-        // 传感器回调 (后台线程, ~200Hz)
+        // 4. 先注册回调再启动传感器（避免丢帧）
         sensor.onFrame = { [weak self] frame in
             guard let self else { return }
-
-            // 1. 编码 OSC Bundle
             let data = OSCEncoder.encode(
                 gyro:     (frame.gyroX, frame.gyroY, frame.gyroZ),
                 accel:    (frame.accelX, frame.accelY, frame.accelZ),
                 quat:     (frame.quatX, frame.quatY, frame.quatZ, frame.quatW),
                 gravity:  (frame.gravityX, frame.gravityY, frame.gravityZ)
             )
-
-            // 2. 发送
             self.sender.send(data)
-
-            // 3. 更新计数器 (lock 保护)
             os_unfair_lock_lock(&self.counterLock)
             self.frameCounter += 1
             self.byteCounter += Int64(data.count)
             os_unfair_lock_unlock(&self.counterLock)
-
-            // 4. 保存最新数据副本
             os_unfair_lock_lock(&self.frameLock)
             self.latestFrame = frame
             self.packetSize = data.count
             os_unfair_lock_unlock(&self.frameLock)
         }
 
-        // 启动传感器
-        sensor.start(hz: targetHz)
+        // 5. 启动传感器
+        guard sensor.start(hz: targetHz) else {
+            sensor.onFrame = nil
+            sender.close()
+            statusText = "传感器不可用 (真机? 权限?)"
+            return
+        }
 
-        // 启动 FPS 更新定时器 (4Hz)
+        // 6. 全部就绪，重置计数器
+        frameCounter = 0
+        byteCounter = 0
+        packetCount = 0
+        byteCount = 0
+        fps = 0
+
+        // 7. 启动 FPS 定时器
         fpsTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.updateStats()
             }
         }
-
-        // 保持屏幕常亮
         UIApplication.shared.isIdleTimerDisabled = true
 
+        // 8. 最后才设置 isStreaming（避免提前禁用 TextField 导致键盘冲突）
         isStreaming = true
         statusText = "发送中 → \(ipAddress):\(portNum)"
     }
