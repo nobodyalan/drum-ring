@@ -133,6 +133,7 @@ def collect_lcy_recordings(
             "is_switch": is_switch,
             "switch_pattern": switch_parsed,
             "gesture_str": gesture_str,
+            "group": str(tags.get("group", "slow")),
         }
 
     # ── Step 2: collect BCL files filtered by ring ──
@@ -182,6 +183,7 @@ def collect_lcy_recordings(
                 imu_path=imu_path,
                 serial_path=serial_path,  # None for pure negatives
                 switch_pattern=meta.get("switch_pattern"),
+                switch_group=meta.get("group", "slow"),
             )
         )
 

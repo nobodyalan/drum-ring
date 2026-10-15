@@ -108,6 +108,8 @@ class IMUData:
         timestamp: float,
         local_timestamp: float | None = None,
         host_timestamp: float | None = None,
+        packet_end_counter: int = 0,
+        arrival_perf: float = 0.0,
     ):
         self.acc_x = acc_x
         self.acc_y = acc_y
@@ -117,6 +119,8 @@ class IMUData:
         self.gyr_z = gyr_z
         self.local_timestamp = timestamp if local_timestamp is None else local_timestamp
         self.host_timestamp = 0.0 if host_timestamp is None else float(host_timestamp)
+        self.packet_end_counter = int(packet_end_counter or 0)
+        self.arrival_perf = float(arrival_perf or 0.0)
         # backward-compatible alias
         self.timestamp = self.local_timestamp
         self.acc_np = np.array([self.acc_x, self.acc_y, self.acc_z])
@@ -383,6 +387,7 @@ class BLERing:
 
     def notify_callback(self, sender, data: bytearray):
         # print(len(data))
+        arrival_perf = time.perf_counter()
         bias = self.gyro_bias
         if data[2] == 0x62 and data[3] == 0x1:
             print("呼吸灯结果")
@@ -447,6 +452,8 @@ class BLERing:
                         local_timestamp,
                         local_timestamp,
                         self.to_host_timestamp(local_timestamp),
+                        imu_end_time,
+                        arrival_perf,
                     )
                     imu_data.append(imu)
 

@@ -22,13 +22,14 @@ PRE_PEAK_FRAMES = 12
 POST_PEAK_FRAMES = 2
 GRAVITY = 9.81
 
-DRUM_CLASS_IDS = tuple(range(5))
+DRUM_CLASS_IDS = tuple(range(6))
 DRUM_CLASS_LABELS = {
     0: "空",
     1: "踩镲",
     2: "通鼓2",
     3: "军鼓",
     4: "通鼓1",
+    5: "吊镲",
 }
 
 FEATURE_MODE = "rawlin12_handcrafted"
@@ -328,6 +329,7 @@ class DrumGestureRecognizer:
         if fc_weight is None:
             raise KeyError("checkpoint 缺少 fc.weight，无法确定类别数")
         class_count = int(fc_weight.shape[0])
+        self.n_classes = class_count
         c_in = self._infer_input_channels(state_dict)
         self.input_channels = c_in
         self.model_head = "weighted" if "time_weights" in state_dict else "gap"

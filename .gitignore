@@ -1,13 +1,30 @@
 # Sliced data caches
 my_sliced_data*/
 my_sliced_lcy*/
+model_train/sliced_datas/
+model_train/train_dataset/
 
 # Processing artifacts
 data_simulate/
 data_processed_local_drum_gesture/
+analysis_outputs/
+review_plots/
 
-# Zipped new data
-data/newdatas/*.zip
+# Raw and encrypted recordings
+data/
+datanew/
+latency_data/
+
+# Local environments and generated runtime files
+.venv/
+qt_plugins/
+desktop/
+*.log
+*.bak
+
+# Large Whisper checkpoints (not used by drum-gesture)
+checkpoint/whisper-word-exp/models/whisper_with_pretrain_best.pt
+checkpoint/whisper-number-exp/models/whisper_with_pretrain_best.pt
 
 # macOS metadata
 __MACOSX/

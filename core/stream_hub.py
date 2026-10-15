@@ -77,6 +77,8 @@ class ImuStreamHub:
         gyr_x: float,
         gyr_y: float,
         gyr_z: float,
+        packet_end_counter: int = 0,
+        arrival_perf: float = 0.0,
     ) -> None:
         payload = {
             "type": "imu",
@@ -85,6 +87,8 @@ class ImuStreamHub:
             "timestamp": local_timestamp,
             "local_timestamp": local_timestamp,
             "host_timestamp": host_timestamp,
+            "packet_end_counter": packet_end_counter,
+            "arrival_perf": arrival_perf,
             "acc": [acc_x, acc_y, acc_z],
             "gyr": [gyr_x, gyr_y, gyr_z],
         }

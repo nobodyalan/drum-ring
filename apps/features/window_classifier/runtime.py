@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtCore import QPointF, QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QWidget
 
 
@@ -143,6 +143,12 @@ class ProbabilityChart(QWidget):
         self._probabilities = [0.0 for _ in self.class_ids]
         self.update()
 
+    def set_class_ids(self, class_ids: tuple[int, ...]) -> None:
+        """Update the bar set at runtime (model class count may differ per checkpoint)."""
+        self.class_ids = tuple(class_ids)
+        self._probabilities = [0.0 for _ in self.class_ids]
+        self.update()
+
     def set_probabilities(
         self,
         probabilities: list[float] | tuple[float, ...] | np.ndarray,
@@ -160,8 +166,15 @@ class ProbabilityChart(QWidget):
                 )
                 + f"，收到: {values.size}"
             )
-        self._probabilities = [float(np.clip(value, 0.0, 1.0)) for value in values]
-        self.update()
+        new_probs = [float(np.clip(value, 0.0, 1.0)) for value in values]
+        # 仅在数值显著变化时重绘: 空闲时概率基本恒定 (类0≈0.9), 避免每帧 50Hz 全量重绘
+        # 挤占主线程, 造成 IMU 处理与音效触发延迟。手势尖峰(>0.005 变化)仍会立即刷新。
+        changed = len(new_probs) != len(self._probabilities) or any(
+            abs(a - b) > 0.005 for a, b in zip(self._probabilities, new_probs)
+        )
+        self._probabilities = new_probs
+        if changed:
+            self.update()
 
     def paintEvent(self, event) -> None:
         _ = event
@@ -343,19 +356,20 @@ class ProbabilityTimelineChart(QWidget):
             painter.setClipRect(plot_rect)
             for idx, class_id in reversed(list(enumerate(self.class_ids))):
                 color = self.class_colors.get(class_id, QColor("#888888"))
-                lw = 2.0 if class_id != 0 else 1.2
+                # 必须用 cosmetic 笔 (宽度 0): 非 cosmetic 笔在 HiDPI 缩放下
+                # (1px 笔 × 1.5 DPR = 1.5px) 会触发 Qt 矢量描边慢路径,
+                # 5 条 300 点折线单次重绘可达秒级 → 打开图表即阻塞卡顿。
+                # 类间区分改用透明度 (class 0 更淡)。
                 alpha = 220 if class_id != 0 else 140
                 c = QColor(color)
                 c.setAlpha(alpha)
-                painter.setPen(QPen(c, lw))
-                points = []
+                painter.setPen(QPen(c, 0))
+                poly = QPolygonF()
                 for elapsed, probs in self._history:
-                    x = int(plot_rect.left() + (elapsed - t_min) / time_span * plot_rect.width())
-                    y = int(plot_rect.bottom() - probs[idx] * plot_rect.height())
-                    points.append((x, y))
-                for i in range(len(points) - 1):
-                    painter.drawLine(points[i][0], points[i][1],
-                                     points[i + 1][0], points[i + 1][1])
+                    x = float(plot_rect.left() + (elapsed - t_min) / time_span * plot_rect.width())
+                    y = float(plot_rect.bottom() - probs[idx] * plot_rect.height())
+                    poly.append(QPointF(x, y))
+                painter.drawPolyline(poly)
             painter.restore()
 
         # ── legend ──

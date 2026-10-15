@@ -62,13 +62,14 @@ POSITIVE_ZONE_END_FRAMES = tuple(
 PEAK_SEARCH_EACH_SIDE = 2 * WINDOW
 EXCLUDE_BEFORE_PEAK = 30
 EXCLUDE_AFTER_PEAK = 24
-TRANSITION_START_OFFSET = 50  # transition zone starts at peak - TRANSITION_START_OFFSET
-TRANSITION_END_OFFSET = 14    # transition zone stops at peak-14 (紧贴正例 zone)
-# Derived: transition zone = [peak - 50, peak - 15) = 35 frames (175ms)
+TRANSITION_START_OFFSET = 60  # transition zone starts at peak - TRANSITION_START_OFFSET
+TRANSITION_GAP = 3            # 过渡区与正例区之间的间隔帧数 (防止完全截断)
+TRANSITION_END_OFFSET = POS_ZONE_END_FIRST + TRANSITION_GAP  # 过渡区终点 = 正例最早末帧 + 间隔
+# Derived: transition zone = [peak - 60, peak - (FIRST+3))
 TRANSITION_NEGATIVES_PER_PEAK = 8  # negative windows sampled from each peak's transition zone
-HARD_NEGATIVES_PER_FILE = 80
+HARD_NEGATIVES_PER_FILE = 180
 SEED = 42
-LABEL_IDS = (1, 2, 3, 4)
+LABEL_IDS = (1, 2, 3, 4, 5)
 LABEL_LAST_DIGIT = False
 
 _TEMP_DIR_HANDLES: list[tempfile.TemporaryDirectory] = []
@@ -82,6 +83,7 @@ class Recording:
     imu_path: Path
     serial_path: Path | None = None  # None → pure-negative recording (no Arduino)
     switch_pattern: tuple[int, int] | None = None  # explicit switch pattern (lcy format)
+    switch_group: str = "slow"  # "slow" → a-b-a-b, "fast" → a-b-b-a
 
 
 def parse_int_tuple(text: str) -> tuple[int, ...]:
@@ -93,7 +95,7 @@ def parse_int_tuple(text: str) -> tuple[int, ...]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train a 5-class local drum gesture model from encrypted data/*.enc recordings."
+        description="Train a 6-class (0=negative + gestures 1-5) local drum gesture model from encrypted data/*.enc recordings."
     )
     parser.add_argument("--data-dir", default=str(ROOT / "data"))
     parser.add_argument("--work-dir", default=str(ROOT / "data_processed_local_drum_gesture"))
@@ -168,6 +170,18 @@ def parse_args() -> argparse.Namespace:
         default=TRANSITION_NEGATIVES_PER_PEAK,
         help="Number of forced negative windows sampled from the 100ms before each peak's positive region.",
     )
+    parser.add_argument(
+        "--transition-start-offset",
+        type=int,
+        default=TRANSITION_START_OFFSET,
+        help="过渡区起点: peak - N 帧 (负例采样区起始, 默认 50)。",
+    )
+    parser.add_argument(
+        "--transition-end-offset",
+        type=int,
+        default=None,
+        help="过渡区终点: peak - N 帧。默认自动 = 正例 zone 最早末帧 + 3 帧间隔 (TRANSITION_GAP)。",
+    )
     parser.add_argument("--balance-classes", action="store_true")
     parser.add_argument("--split-mode", choices=["group", "random"], default="group")
     parser.add_argument("--no-test", action="store_true",
@@ -178,7 +192,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--val-one-per-class",
         action="store_true",
-        help="Validation: 1 normal recording per gesture class (class 1-4). Switch/rapid recordings never enter val.",
+        help="Validation: 1 normal recording per gesture class (class 1-5). Switch/rapid recordings never enter val.",
     )
     parser.add_argument("--lr-find", action="store_true",
                         help="Run LR finder before training to pick optimal learning rate")
@@ -542,12 +556,22 @@ def transition_negative_windows(
         return np.empty((0, max(channel_count, 1), window), dtype=np.float32)
 
     segments: list[np.ndarray] = []
-    for peak in peaks:
+    for i, peak in enumerate(peaks):
         trans_start = peak - TRANSITION_START_OFFSET  # inclusive
         trans_end = peak - TRANSITION_END_OFFSET  # exclusive
 
         min_end = trans_start + window - 1
         max_end = trans_end - 1
+
+        # ── 防止过渡负例触碰到上一个峰的正例区 ──
+        # 上一个正例区最晚帧 = prev_peak - POS_ZONE_END_LAST; 过渡窗口 [e-W+1, e]
+        # 需完全位于其后: e >= prev_peak - POS_ZONE_END_LAST + W
+        if i > 0:
+            prev_peak = peaks[i - 1]
+            prev_safe = prev_peak - POS_ZONE_END_LAST + window
+            if min_end < prev_safe:
+                min_end = prev_safe
+
         if min_end > max_end or trans_start < 0:
             continue
 
@@ -620,20 +644,22 @@ def _extract_switch_label_hint(user: str, a: int, b: int) -> int | None:
     return None
 
 
-def _build_switch_labels(a: int, b: int, start_label: int, n_peaks: int) -> np.ndarray:
-    """Generate alternating per-peak labels for switch recordings.
+def _build_switch_labels(a: int, b: int, start_label: int, n_peaks: int, group: str = "slow") -> np.ndarray:
+    """Generate per-peak labels for switch recordings.
 
-    Pattern: a-b-a-b-... or b-a-b-a-... depending on start_label.
-    When start_label doesn't match a or b, default to starting with a.
+    group="slow" → alternating a-b-a-b (or b-a-b-a if start_label == b)
+    group="fast" → a-b-b-a-a-b-b-a ... (double pattern)
     """
     labels = np.empty(n_peaks, dtype=np.int64)
-    if start_label == b:
-        use_a = False  # start with b
+    if group == "fast":
+        pattern = (a, b, b, a)
     else:
-        use_a = True   # start with a (explicit match or default)
+        if start_label == b:
+            pattern = (b, a)
+        else:
+            pattern = (a, b)
     for i in range(n_peaks):
-        labels[i] = a if use_a else b
-        use_a = not use_a
+        labels[i] = pattern[i % len(pattern)]
     return labels
 
 
@@ -744,7 +770,7 @@ def build_dataset(
                 hint = _extract_switch_label_hint(recording.user, a, b)
                 if hint is not None:
                     start_label = hint
-                peak_labels = _build_switch_labels(a, b, start_label, len(peaks))
+                peak_labels = _build_switch_labels(a, b, start_label, len(peaks), recording.switch_group)
                 # 每个 peak 生成 len(POSITIVE_ZONE_END_FRAMES) 个窗口 → 展开为逐窗口标签
                 pos_labels = np.repeat(peak_labels, len(POSITIVE_ZONE_END_FRAMES))[: pos.shape[0]]
                 pos_label_for_group = f"switch{a}{b}"
@@ -819,7 +845,7 @@ def build_dataset(
             hint = _extract_switch_label_hint(recording.user, a, b)
             if hint is not None:
                 start_label = hint
-            peak_labels = _build_switch_labels(a, b, start_label, len(peaks))
+            peak_labels = _build_switch_labels(a, b, start_label, len(peaks), recording.switch_group)
             rec_summary["switch_pattern"] = f"{a}-{b}-{a}-{b}..."
             rec_summary["switch_start_label"] = int(start_label)
             rec_summary["per_peak_labels"] = peak_labels.tolist()
@@ -886,12 +912,12 @@ def split_by_group(
     n_val = max(n_classes, int(val_size * len(train_val_groups)))
 
     if val_one_per_class:
-        # ── 每类抽 2 个非 switch/rapid 录制进验证集 ──
+        # ── 每类抽 2 个非 switch/rapid 录制进验证集 (不足 2 个则取 1 个) ──
         rng = np.random.default_rng(seed)
         val_groups_list: list = []
         train_groups_list: list = list(train_val_groups)
 
-        val_per_class = 1
+        val_per_class = 2
         for label in sorted(label_counts.keys()):
             if label == 0:
                 continue
@@ -1275,14 +1301,30 @@ def main() -> int:
     args = parse_args()
     global WINDOW
     global POSITIVE_ZONE_END_FRAMES
+    global POS_ZONE_END_FIRST
+    global POS_ZONE_END_LAST
+    global POS_ZONE_STRIDE
     global PEAK_SEARCH_EACH_SIDE
     global EXCLUDE_BEFORE_PEAK
     global EXCLUDE_AFTER_PEAK
+    global TRANSITION_START_OFFSET
+    global TRANSITION_END_OFFSET
     global LABEL_IDS
     global LABEL_LAST_DIGIT
 
     WINDOW = int(args.window)
     POSITIVE_ZONE_END_FRAMES = tuple(args.lead_end_offsets)
+    # 同步正例 zone 边界与步长到实际切窗函数 (positive_windows 使用这些常量)
+    if len(POSITIVE_ZONE_END_FRAMES) >= 2:
+        POS_ZONE_END_FIRST = max(POSITIVE_ZONE_END_FRAMES)
+        POS_ZONE_END_LAST = min(POSITIVE_ZONE_END_FRAMES)
+        POS_ZONE_STRIDE = abs(POSITIVE_ZONE_END_FRAMES[1] - POSITIVE_ZONE_END_FRAMES[0])
+    # 过渡区: 终点默认 = 正例最早末帧 + TRANSITION_GAP 间隔, 避免与正例完全截断
+    TRANSITION_START_OFFSET = int(args.transition_start_offset)
+    if args.transition_end_offset is None:
+        TRANSITION_END_OFFSET = POS_ZONE_END_FIRST + TRANSITION_GAP
+    else:
+        TRANSITION_END_OFFSET = int(args.transition_end_offset)
     PEAK_SEARCH_EACH_SIDE = int(args.peak_search_samples)
     EXCLUDE_BEFORE_PEAK = int(args.exclude_before_peak)
     EXCLUDE_AFTER_PEAK = int(args.exclude_after_peak)

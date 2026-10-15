@@ -66,6 +66,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.shared.file_saver import materialize
 from models.drum_gesture_recognizer import OnlineLinearAccelerationEstimator
 
 # ═══════════════════════════════════════════════════════════════════
@@ -724,6 +725,11 @@ Examples:
   python scripts/visualize_drum_gesture.py --stamp 1783340555 --clicks 3 12
   python scripts/visualize_drum_gesture.py --stamp 1783340555 --save plot.png
   python scripts/visualize_drum_gesture.py --stamp 1783340555 --edge RISING
+
+Simple view (hyb/lcy, filters: user/hand/label/group):
+  python scripts/visualize_drum_gesture.py --lcy --lcy-dir datanew/hyb --user hyb --hand right --label 1 --group slow
+  python scripts/visualize_drum_gesture.py --lcy --lcy-dir datanew/hyb --label 1-2 --group fast
+  python scripts/visualize_drum_gesture.py --lcy --lcy-dir datanew/lcy --user lcy --hand left
         """,
     )
     # Selection filters
@@ -733,8 +739,12 @@ Examples:
                         help="Substring match on recording timestamp")
     parser.add_argument("--user", default="",
                         help="Filter by user name")
-    parser.add_argument("--label", type=int, default=None,
-                        help="Filter by gesture label (1-4)")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Filter by gesture label (e.g. 1, 2, 1-2)")
+    parser.add_argument("--hand", default="",
+                        help="[简单视图] Filter by hand (left/right)")
+    parser.add_argument("--group", default="",
+                        help="[简单视图] Filter by group (slow/fast/combo)")
     parser.add_argument("--list", action="store_true",
                         help="List available recordings and exit")
     parser.add_argument("--stats", action="store_true",
@@ -779,6 +789,10 @@ Examples:
                         help="Quick IMU view: no serial/peaks, just raw acc+gyro+|acc|. Use --file to specify.")
     parser.add_argument("--quick-threshold", type=float, default=100.0,
                         help="Quick mode peak threshold for |acc| (default: 100)")
+    parser.add_argument("--lcy", action="store_true",
+                        help="简单视图: 显示完整图像 + 手部 + 标签 (hyb/lcy 通用, materialize 解密)")
+    parser.add_argument("--lcy-dir", default=str(ROOT / "datanew" / "lcy"),
+                        help="简单视图数据目录 (默认: datanew/lcy/, 可指 datanew/hyb/)")
     parser.add_argument("--pre", type=int, default=None,
                         help="Positive zone: pre-peak frames (red band [peak-pre, peak-post])")
     parser.add_argument("--post", type=int, default=None,
@@ -901,6 +915,186 @@ def _quick_view(decrypted_dir: Path, args) -> int:
             for pt in quick_peaks:
                 if t_min <= pt <= t_max:
                     ax.axvline(x=pt, color="#e74c3c", linestyle="--", lw=0.6, alpha=0.5)
+
+    if args.save:
+        plt.savefig(args.save, dpi=150)
+        print(f"保存: {args.save}")
+    else:
+        plt.show()
+    return 0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# lcy simple view (materialize decryption + hand + label)
+# ═══════════════════════════════════════════════════════════════════
+
+def _has_chinese(text: str) -> bool:
+    """Check if text contains Chinese characters."""
+    return any('\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf' for ch in text)
+
+
+def _parse_lcy_name(name: str) -> tuple[str, str, str, str, str] | None:
+    """Parse lcy IMU filename → (stamp, user, gesture, group, mac).
+
+    e.g. BCL60359F0_..._unknown_hand_1785637635_lcy_1-2_slow_1_50.npy
+    """
+    mac = name.split("_", 1)[0]
+    m = re.search(
+        r"_(\d{10})_([A-Za-z0-9]+?)_([0-9]+(?:-[0-9]+)?)_([A-Za-z]+)_\d+_\d+\.npy$",
+        name,
+    )
+    if not m:
+        return None
+    stamp, user, gesture, group = m.groups()
+    return stamp, user, gesture, group, mac
+
+
+def _lcy_hand(meta_path: Path, mac: str, filename: str) -> str:
+    """Determine hand: recording_meta rings[].hand → filename → unknown."""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        for ring in meta.get("rings", []):
+            if str(ring.get("name", "")) == mac:
+                hand = str(ring.get("hand", ""))
+                if hand in ("left", "right"):
+                    return hand
+    except Exception:
+        pass
+    lower = filename.lower()
+    if "left" in lower:
+        return "left"
+    if "right" in lower:
+        return "right"
+    return "unknown"
+
+
+def _lcy_view(data_dir: Path, args) -> int:
+    """Simple lcy view: full IMU recording + hand + label (materialize decryption)."""
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    if not data_dir.exists():
+        print(f"[X] 目录不存在: {data_dir}")
+        return 1
+
+    # ── 解密 (排除 phone_imu 和中文名) ──
+    tmp = tempfile.TemporaryDirectory(prefix="lcy_viz_")
+    decrypted = Path(tmp.name)
+    for path in sorted(data_dir.glob("*.enc")):
+        if path.name.startswith("phone_imu_"):
+            continue
+        if _has_chinese(path.name):
+            continue
+        materialize(path, output_dir=decrypted)
+    _TEMP_DIR_HANDLES.append(tmp)
+
+    # ── 找 IMU 文件并解析字段 ──
+    imu_paths = [p for p in sorted(decrypted.glob("*.npy"))
+                 if not p.name.startswith("phone_imu_")]
+    if not imu_paths:
+        print("[X] 无 IMU 文件")
+        return 1
+
+    # meta 索引: stamp → meta 路径 (用于读手部)
+    meta_by_stamp: dict[str, Path] = {}
+    for mp in sorted(decrypted.glob("recording_meta_*.json")):
+        m = re.search(r"_(\d{10})_", mp.name)
+        if m:
+            meta_by_stamp[m.group(1)] = mp
+
+    # 解析所有候选并应用过滤
+    candidates = []
+    for p in imu_paths:
+        info = _parse_lcy_name(p.name)
+        if info is None:
+            continue
+        stamp, user, gesture, group, mac = info
+        hand = _lcy_hand(meta_by_stamp.get(stamp), mac, p.name)
+        candidates.append({
+            "path": p, "stamp": stamp, "user": user,
+            "gesture": gesture, "group": group, "hand": hand,
+        })
+
+    if args.stamp:
+        candidates = [c for c in candidates if args.stamp in c["stamp"]]
+    if args.user:
+        candidates = [c for c in candidates if c["user"] == args.user]
+    if args.hand:
+        candidates = [c for c in candidates if c["hand"] == args.hand]
+    if args.group:
+        candidates = [c for c in candidates if c["group"] == args.group]
+    if args.label is not None:
+        candidates = [c for c in candidates if c["gesture"] == args.label]
+
+    if not candidates:
+        print("[X] 无匹配文件 (可用 --hand/--group/--label/--user/--stamp 过滤)")
+        return 1
+    if len(candidates) > 1:
+        print(f"  {len(candidates)} 个匹配, 使用第一个:")
+        for c in candidates:
+            print(f"    [{c['hand']:>5}] {c['user']}  gesture={c['gesture']}  "
+                  f"group={c['group']}  stamp={c['stamp']}")
+
+    first = candidates[0]
+    imu_path = first["path"]
+    stamp = first["stamp"]
+    user = first["user"]
+    gesture = first["gesture"]
+    group = first["group"]
+    hand = first["hand"]
+
+    print(f"加载: {imu_path.name}")
+    imu = np.load(imu_path)
+    t = imu[:, 1] if imu.shape[1] > 1 and np.nanmax(imu[:, 1]) > 0 else imu[:, 0]
+    t = t.astype(np.float64) - float(t[0])
+    acc = imu[:, 2:5].astype(np.float32)
+    gyr = imu[:, 5:8].astype(np.float32)
+    acc_mag = np.linalg.norm(acc, axis=1)
+    gyr_mag = np.linalg.norm(gyr, axis=1)
+
+    t_min, t_max = args.range if args.range else (0.0, float(t[-1]))
+    mask = (t >= t_min) & (t <= t_max)
+
+    label_display = gesture if "-" in gesture else f"gesture_{gesture}"
+    title = args.title or (
+        f"user={user}  gesture={label_display}  group={group}  hand={hand}  stamp={stamp}"
+    )
+
+    fig = plt.figure(figsize=(16, 10), constrained_layout=True)
+    gs = GridSpec(3, 1, figure=fig, height_ratios=[1, 1, 1.2], hspace=0.10)
+    ax_acc = fig.add_subplot(gs[0, 0])
+    ax_gyr = fig.add_subplot(gs[1, 0], sharex=ax_acc)
+    ax_mag = fig.add_subplot(gs[2, 0], sharex=ax_acc)
+
+    for ch, letter in enumerate("xyz"):
+        ax_acc.plot(t[mask], acc[mask, ch], color=ACC_COLORS[letter],
+                    lw=0.8, alpha=0.85, label=f"acc_{letter}")
+    ax_acc.set_ylabel("raw acc\n(m/s²)", fontsize=10, fontweight="bold")
+    ax_acc.legend(loc="upper right", fontsize=7, ncol=3,
+                  framealpha=0.5, edgecolor="none")
+    ax_acc.tick_params(labelsize=8)
+    ax_acc.set_title(title, fontsize=10, color="gray", loc="left")
+
+    for ch, letter in enumerate("xyz"):
+        ax_gyr.plot(t[mask], gyr[mask, ch], color=GYRO_COLORS[letter],
+                    lw=0.8, alpha=0.85, label=f"gyr_{letter}")
+    ax_gyr.set_ylabel("raw gyro\n(rad/s)", fontsize=10, fontweight="bold")
+    ax_gyr.legend(loc="upper right", fontsize=7, ncol=3,
+                  framealpha=0.5, edgecolor="none")
+    ax_gyr.tick_params(labelsize=8)
+
+    ax_mag.plot(t[mask], acc_mag[mask], color=MAG_COLORS["raw_acc"],
+                lw=1.0, alpha=0.75, label="|raw acc|")
+    ax_mag.plot(t[mask], gyr_mag[mask], color=MAG_COLORS["gyro"],
+                lw=1.0, alpha=0.75, label="|gyro|")
+    ax_mag.axhline(y=9.81, color="gray", linestyle="--", alpha=0.4, lw=0.8, label="1g")
+    ax_mag.set_ylabel("magnitude", fontsize=10, fontweight="bold")
+    ax_mag.legend(loc="upper right", fontsize=7, ncol=3,
+                  framealpha=0.5, edgecolor="none")
+    ax_mag.tick_params(labelsize=8)
+
+    for ax in (ax_acc, ax_gyr, ax_mag):
+        _setup_time_axes([ax], t_min, t_max)
 
     if args.save:
         plt.savefig(args.save, dpi=150)
@@ -1150,6 +1344,11 @@ def print_stats_table(stats_list: list[OffsetStats]) -> None:
 
 def main() -> int:
     args = parse_args()
+
+    # ── lcy simple view: 在标准解密之前处理 (使用 materialize 解密) ──
+    if args.lcy:
+        return _lcy_view(Path(args.lcy_dir).expanduser().resolve(), args)
+
     data_dir = Path(args.data_dir).expanduser().resolve()
 
     if not data_dir.exists():
@@ -1179,7 +1378,7 @@ def main() -> int:
     if args.user:
         candidates = [r for r in candidates if r["user"] == args.user]
     if args.label is not None:
-        candidates = [r for r in candidates if r["label"] == args.label]
+        candidates = [r for r in candidates if str(r["label"]) == args.label]
 
     if not candidates:
         print("[X] No recordings match the filter criteria.")
